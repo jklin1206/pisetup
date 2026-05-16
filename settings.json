@@ -1,0 +1,11 @@
+{
+  "lastChangelogVersion": "0.74.0",
+  "defaultProvider": "opencode-go",
+  "defaultModel": "deepseek-v4-flash",
+  "defaultThinkingLevel": "high",
+  "theme": "nebula-focus",
+  "packages": [
+    "npm:pi-subagents",
+    "npm:pi-mcp-adapter"
+  ]
+}

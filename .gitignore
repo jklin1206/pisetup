@@ -1,0 +1,10 @@
+# No API keys or credentials
+auth.json
+mcp-cache.json
+mcp-npx-cache.json
+
+# No node_modules
+**/node_modules/
+
+# No run artifacts
+pi-workers/runs/

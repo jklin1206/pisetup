@@ -1,0 +1,9 @@
+{
+  "roleModels": {
+    "scout": "opencode-go/deepseek-v4-flash",
+    "researcher": "opencode-go/kimi-k2.6",
+    "planner": "opencode-go/glm-5.1",
+    "reviewer": "opencode-go/glm-5.1",
+    "worker": "current"
+  }
+}

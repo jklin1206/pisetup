@@ -1,0 +1,40 @@
+{
+  "enabled": true,
+  "logo": [
+    "   ███████████████████████████╗  ",
+    "   ╚══██████╔════════██████╔══╝  ",
+    "      ██████║        ██████║     ",
+    "      ██████║        ██████║     ",
+    "      ██████║        ██████║     ",
+    "      ██████║        ██████║     ",
+    "      ██████║        ██████║     ",
+    "      ██████║        ██████║     ",
+    "   ████████████╗  ████████████╗  ",
+    "   ╚═══════════╝  ╚═══════════╝  "
+  ],
+  "eyebrow": "",
+  "subtext": "",
+  "loadingText": "loading",
+  "showHairline": true,
+  "hairlineWidth": 44,
+  "animationMs": 0,
+  "frameMs": 1000,
+  "status": {
+    "enabled": true,
+    "refreshMs": 1200,
+    "showCwd": true,
+    "showGit": true,
+    "showModel": true,
+    "showContext": true,
+    "showMessages": true
+  },
+  "colors": {
+    "ink": "#e8f7ff",
+    "muted": "#8fb2c7",
+    "dim": "#4e6b7a",
+    "accent": "#5ba4e6",
+    "accentHot": "#7ec8f0",
+    "accentCool": "#2d6db5",
+    "loading": "#76e3ea"
+  }
+}
