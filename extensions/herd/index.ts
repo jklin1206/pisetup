@@ -133,6 +133,27 @@ async function openHerdr(session: string, cwd: string) {
   const safeSession = session.replace(/[^a-zA-Z0-9._-]/g, "") || DEFAULT_SESSION;
   const cmuxPath = await execFile("bash", ["-lc", "command -v cmux"], { timeout: 5_000 });
   if (cmuxPath.code === 0 && cmuxPath.stdout.trim()) {
+    const identified = await execFile("cmux", ["identify", "--no-caller"], { timeout: 5_000 });
+    const current = parseJson<any>(identified.stdout)?.focused;
+    const workspace = current?.workspace_ref;
+    const pane = current?.pane_ref;
+
+    if (workspace && pane) {
+      const created = await execFile("cmux", [
+        "new-surface",
+        "--type", "terminal",
+        "--workspace", workspace,
+        "--pane", pane,
+        "--focus", "true",
+      ], { timeout: 10_000 });
+      const surface = created.stdout.match(/surface:\d+/)?.[0];
+      if (created.code === 0 && surface) {
+        await execFile("cmux", ["tab-action", "--action", "rename", "--workspace", workspace, "--tab", surface, "--title", `Herd ${safeSession}`], { timeout: 5_000 });
+        await execFile("cmux", ["send", "--workspace", workspace, "--surface", surface, `cd ${quote(cwd)} && herdr --session ${safeSession}\n`], { timeout: 5_000 });
+        return `Opened cmux tab in current workspace: Herd ${safeSession}`;
+      }
+    }
+
     const result = await execFile("cmux", [
       "new-workspace",
       "--name", `Herd ${safeSession}`,
@@ -140,7 +161,7 @@ async function openHerdr(session: string, cwd: string) {
       "--command", `herdr --session ${safeSession}`,
       "--focus", "true",
     ], { timeout: 15_000 });
-    if (result.code === 0) return `Opened cmux workspace: Herd ${safeSession}`;
+    if (result.code === 0) return `Opened cmux workspace fallback: Herd ${safeSession}`;
   }
 
   if (process.platform !== "darwin") return "Open manually: herdr --session " + safeSession;
