@@ -35,12 +35,12 @@ const PI_LOGO = [
 ];
 
 const GRADIENT_COLORS = [
-  "\x1b[38;2;137;87;229m",
-  "\x1b[38;2;88;166;255m",
-  "\x1b[38;2;121;192;255m",
-  "\x1b[38;2;118;227;234m",
-  "\x1b[38;2;126;231;135m",
-  "\x1b[38;2;210;168;255m",
+  "\x1b[38;2;137;87;229m", // nebula violet
+  "\x1b[38;2;45;109;181m", // deep blue
+  "\x1b[38;2;88;166;255m", // focus blue
+  "\x1b[38;2;121;192;255m", // blue soft
+  "\x1b[38;2;118;227;234m", // cyan glow
+  "\x1b[38;2;126;200;240m", // cool highlight
 ];
 
 function bold(text: string): string {

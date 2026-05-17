@@ -2811,7 +2811,12 @@ export default function powerlineFooter(pi: ExtensionAPI) {
             focused: false,
             invalidate: () => welcome.invalidate(),
             render: (width: number) => welcome.render(width),
-            handleInput: () => dismiss(),
+            handleInput: (data: string) => {
+              // Do not dismiss on terminal mouse events, especially scroll.
+              // Mouse tracking sequences commonly arrive as CSI < ... M/m or legacy CSI M.
+              if (data.includes("\x1b[<") || data.includes("\x1b[M")) return;
+              dismiss();
+            },
             dispose: () => {
               dismissed = true;
               if (interval) clearInterval(interval);
