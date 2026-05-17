@@ -1,4 +1,5 @@
-import { existsSync, mkdir, readFile, writeFile, readdir } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises'
 import { execFile, spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
