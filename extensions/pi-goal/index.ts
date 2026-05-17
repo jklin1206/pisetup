@@ -3,6 +3,8 @@ import { execFile, spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { StringEnum } from '@earendil-works/pi-ai'
+import { Type } from 'typebox'
 
 const ROOT = path.join(os.homedir(), '.pi', 'agent', 'pi-goals')
 const WORKERS_ROOT = path.join(os.homedir(), '.pi', 'agent', 'pi-workers')
