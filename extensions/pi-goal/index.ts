@@ -296,6 +296,32 @@ function evidenceRequirementText(goalText: string): string {
     : 'Completion requires at least one screenshot showing the final working result.'
 }
 
+type AutoGoalDecision = { shouldAsk: boolean; force: boolean; reason: string }
+
+function shouldOfferAutoGoal(text: string): AutoGoalDecision {
+  const trimmed = text.trim()
+  const lower = trimmed.toLowerCase()
+  if (!trimmed || trimmed.length < 24) return { shouldAsk: false, force: false, reason: 'too short' }
+  if (/^(?:\/|goal\b|pi\s+goal\b|herd\b|pi\s+herd\b)/i.test(trimmed)) return { shouldAsk: false, force: false, reason: 'command' }
+  if (/\b(no goal|don'?t track|do not track|just answer|quick answer|one[- ]off|no need to track|don't make this a goal)\b/i.test(lower)) {
+    return { shouldAsk: false, force: false, reason: 'suppressed by user' }
+  }
+
+  const force = /\b(track this|make this a goal|goalify this|treat this as a goal|use goal|set up a goal)\b/i.test(lower)
+  if (force) return { shouldAsk: true, force: true, reason: 'explicit goal request' }
+
+  if (/\b(what is|what are|explain|compare|summarize|why does|how do i|quick question|brainstorm|think through)\b/i.test(lower)) {
+    return { shouldAsk: false, force: false, reason: 'informational' }
+  }
+
+  const action = /\b(build|implement|create|add|fix|debug|redesign|design|migrate|refactor|audit|cleanup|clean up|organize|ship|deploy|launch|wire up|set up|get .* working|make .* work)\b/i.test(lower)
+  const verification = /\b(verify|test|make sure|ensure|confirm|working|works|screenshot|recording|end[- ]to[- ]end|e2e|flow|visual|done|complete|finish|from start to finish)\b/i.test(lower)
+  const multiStep = /\b(and then|after that|full|complete|entire|all of|from .* to .*|step[- ]by[- ]step)\b/i.test(lower) || trimmed.length > 180
+
+  if (action && (verification || multiStep)) return { shouldAsk: true, force: false, reason: verification ? 'action + verification' : 'multi-step action' }
+  return { shouldAsk: false, force: false, reason: 'low confidence' }
+}
+
 function evidenceBlockers(goal: GoalRecord, evidence: EvidenceItem[]): string[] {
   const screenshots = evidence.filter((e) => e.type === 'screenshot')
   const recordings = evidence.filter((e) => e.type === 'recording' || e.type === 'screencast')
@@ -713,6 +739,11 @@ Usage:
   goal evidence                        List all captured evidence
   goal iterations                      Show iteration history
   goal list                             List all goals
+
+Auto-detect:
+  Clear multi-step/verifiable requests prompt: "Track this as a Goal?"
+  Auto-detect is ask-first and never auto-spawns Herd/subagent workers.
+  Suppress with: "no goal", "don't track", "just answer", "one-off".
 
 Evidence and verification:
   Every completed goal requires at least one screenshot.
@@ -1399,15 +1430,41 @@ export default function (pi: ExtensionAPI) {
   })
 
   pi.on('input', async (event, ctx) => {
-    if (!/^(?:pi\s+)?goal(?:s)?\b/i.test(event.text.trim()) && !/^\/goal\b/i.test(event.text.trim())) return { action: 'continue' }
+    const text = event.text.trim()
+    if (/^(?:pi\s+)?goal(?:s)?\b/i.test(text) || /^\/goal\b/i.test(text)) {
+      try {
+        const result = await handleGoalCommand(event.text, ctx)
+        ctx.ui.notify(result, 'info')
+        await refreshFooter(ctx)
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error')
+      }
+      return { action: 'handled' }
+    }
+
+    // Conservative auto-goal detection. Ask-first, and never auto-iterate/spawn workers.
     try {
-      const result = await handleGoalCommand(event.text, ctx)
-      ctx.ui.notify(result, 'info')
-      await refreshFooter(ctx)
+      const goals = await listGoals()
+      const active = goals.find((g) => g.status !== 'done' && g.status !== 'paused')
+      if (!active && ctx.hasUI) {
+        const decision = shouldOfferAutoGoal(text)
+        if (decision.shouldAsk) {
+          const ok = decision.force || await ctx.ui.confirm(
+            'Track with Goal?',
+            `This looks like a verifiable multi-step objective (${decision.reason}).\n\nTrack it as a Goal?\n\nGoal will only create the tracker/evidence requirements. It will NOT auto-spawn Herd or subagent workers.`
+          )
+          if (ok) {
+            const result = await handleGoalCommand(`goal ${text}`, ctx)
+            ctx.ui.notify(`${result}\n\nContinuing with your request. Use /goal iterate when you want Goal to route the next agent.`, 'info')
+            await refreshFooter(ctx)
+          }
+        }
+      }
     } catch (error) {
       ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error')
     }
-    return { action: 'handled' }
+
+    return { action: 'continue' }
   })
 
   pi.registerTool({
@@ -1417,6 +1474,8 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: 'Set and manage persistent goals with visual evidence verification',
     promptGuidelines: [
       'Use goal when the user wants to achieve a multi-step objective with verifiable results.',
+      'Auto-goal detection is conservative and ask-first; it must not create goals for simple questions or one-off tasks.',
+      'Auto-goal creation must not auto-spawn Herd/subagent workers; iteration/routing is explicit.',
       'Goal is a lightweight coordinator/evaluator. It chooses the needed agent role and routes to visible Herd workers or hidden subagents.',
       'Use Herd for visible long-running work when control/persistence matters. Use hidden scout/researcher/planner/reviewer subagents for narrow advisory tasks.',
       'Do not use implementation workers by default; only spawn worker role if the user explicitly requests delegated implementation.',
