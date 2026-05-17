@@ -19,6 +19,13 @@
   "hairlineWidth": 52,
   "animationMs": 1500,
   "frameMs": 1000,
+  "overlay": {
+    "enabled": true,
+    "dismissSeconds": 120,
+    "width": "78%",
+    "minWidth": 100,
+    "maxHeight": "88%"
+  },
   "status": {
     "enabled": true,
     "refreshMs": 1200,

@@ -19,6 +19,13 @@ interface MenuStartConfig {
   hairlineWidth: number;
   animationMs: number;
   frameMs: number;
+  overlay: {
+    enabled: boolean;
+    dismissSeconds: number;
+    width: string;
+    minWidth: number;
+    maxHeight: string;
+  };
   status: {
     enabled: boolean;
     refreshMs: number;
@@ -61,6 +68,13 @@ const DEFAULT_CONFIG: MenuStartConfig = {
   hairlineWidth: 44,
   animationMs: 0,
   frameMs: 1000,
+  overlay: {
+    enabled: true,
+    dismissSeconds: 120,
+    width: "78%",
+    minWidth: 100,
+    maxHeight: "88%",
+  },
   status: {
     enabled: true,
     refreshMs: 1200,
@@ -138,6 +152,10 @@ function deepMerge(base: MenuStartConfig, overrides: Partial<MenuStartConfig>): 
     ...base,
     ...overrides,
     logo: Array.isArray(overrides.logo) ? overrides.logo : base.logo,
+    overlay: {
+      ...base.overlay,
+      ...(overrides.overlay ?? {}),
+    },
     status: {
       ...base.status,
       ...(overrides.status ?? {}),
@@ -282,7 +300,7 @@ function sectionLine(label: string, value: string, colors: { accent: Rgb; muted:
   return `${fg(colors.accent, label.padEnd(9, " "))}${fg(colors.muted, value)}`;
 }
 
-function renderOverlay(width: number, _startedAt: number, config: MenuStartConfig, ctx: ExtensionContext) {
+function renderOverlay(width: number, _startedAt: number, config: MenuStartConfig, ctx: ExtensionContext, countdown: number) {
   const ink = hexToRgb(config.colors.ink, [232, 247, 255]);
   const muted = hexToRgb(config.colors.muted, [143, 178, 199]);
   const dimColor = hexToRgb(config.colors.dim, [78, 107, 122]);
@@ -297,23 +315,17 @@ function renderOverlay(width: number, _startedAt: number, config: MenuStartConfi
     ? (elapsed / config.animationMs) * 1.4
     : 0;
 
-  const cardWidth = Math.max(58, Math.min(width, 92));
+  const cardWidth = Math.min(Math.max(96, width - 6), 124);
   const innerWidth = cardWidth - 4;
-  const leftWidth = Math.min(34, Math.max(26, Math.floor(innerWidth * 0.4)));
+  const leftWidth = Math.min(46, Math.max(38, Math.floor(innerWidth * 0.43)));
   const rightWidth = innerWidth - leftWidth - 3;
 
-  const sourceLogo = width < 100 ? [
-    "█████████████╗",
-    "╚═══███╔═══╝",
-    "    ███║    ",
-    "    ███║    ",
-    "███████████╗",
-    "╚══════════╝",
-  ] : config.logo;
+  const sourceLogo = config.logo;
   const logo = normalizeLogo(sourceLogo).map((line, index) => bold(renderLogoLine(line, index, sourceLogo.length, { accentCool, accent, accentHot }, shimmer)));
   const leftPane = [
     "",
     center(fg(ink, "Welcome back!"), leftWidth),
+    center(fg(muted, "Pi control surface"), leftWidth),
     "",
     ...logo.map((line) => center(line, leftWidth)),
     "",
@@ -347,7 +359,7 @@ function renderOverlay(width: number, _startedAt: number, config: MenuStartConfi
   const framed = [
     frameTitle("pi agent", cardWidth, { border, accentHot, muted }),
     ...body,
-    frameBottom("Press any key to continue", cardWidth, { border, muted }),
+    frameBottom(`Press any key to continue (${countdown}s)`, cardWidth, { border, muted }),
   ];
 
   return framed.map((line) => center(line, width));
@@ -365,7 +377,7 @@ export default function (pi: ExtensionAPI) {
 
   function install(ctx: ExtensionContext) {
     const config = loadConfig(ctx.cwd);
-    enabled = config.enabled && process.env.PI_MENU_START_DISABLED !== "1" && process.env.PI_QUIET_HEADER_DISABLED !== "1";
+    enabled = config.enabled && config.overlay.enabled && process.env.PI_MENU_START_DISABLED !== "1" && process.env.PI_QUIET_HEADER_DISABLED !== "1";
     if (!ctx.hasUI || !enabled) return;
 
     const startedAt = Date.now();
@@ -374,15 +386,25 @@ export default function (pi: ExtensionAPI) {
 
     void ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
       let closed = false;
+      let countdownTimer: ReturnType<typeof setInterval> | undefined;
       const close = () => {
         if (closed) return;
         closed = true;
+        if (countdownTimer) clearInterval(countdownTimer);
         stopAnimation();
         done();
       };
 
-      const timeout = setTimeout(close, 4500);
+      let countdown = Math.max(0, config.overlay.dismissSeconds);
+      countdownTimer = countdown > 0 ? setInterval(() => {
+        if (closed) return;
+        countdown--;
+        tui.requestRender();
+        if (countdown <= 0) close();
+      }, 1000) : undefined;
+
       animationTimer = setInterval(() => {
+        if (closed) return;
         if (Date.now() - startedAt > config.animationMs + 500) {
           stopAnimation();
           return;
@@ -392,11 +414,14 @@ export default function (pi: ExtensionAPI) {
 
       return {
         render(width: number) {
-          return renderOverlay(width, startedAt, config, ctx);
+          return renderOverlay(width, startedAt, config, ctx, countdown);
         },
         handleInput() {
-          clearTimeout(timeout);
           close();
+        },
+        dispose() {
+          if (countdownTimer) clearInterval(countdownTimer);
+          stopAnimation();
         },
         invalidate() {},
       };
@@ -404,9 +429,9 @@ export default function (pi: ExtensionAPI) {
       overlay: true,
       overlayOptions: {
         anchor: "center",
-        width: "58%",
-        minWidth: 64,
-        maxHeight: "80%",
+        width: config.overlay.width,
+        minWidth: config.overlay.minWidth,
+        maxHeight: config.overlay.maxHeight,
         margin: 2,
         visible: (termWidth: number, termHeight: number) => termWidth >= 78 && termHeight >= 18,
       },
