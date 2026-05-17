@@ -19,6 +19,7 @@
     "border": "#8957e5"
   },
   "icons": {
+    "pi": "Π",
     "auto": "Π",
     "warning": "!"
   }

@@ -28,6 +28,7 @@ export type ColorScheme = Partial<Record<SemanticColor, ColorValue>>;
 
 // Built-in segment identifiers
 export type BuiltinStatusLineSegmentId =
+  | "pi"
   | "model"
   | "shell_mode"
   | "path"

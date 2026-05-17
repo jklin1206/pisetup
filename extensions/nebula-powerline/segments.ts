@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { BuiltinStatusLineSegmentId, RenderedSegment, SegmentContext, SemanticColor, StatusLineSegment, StatusLineSegmentId } from "./types.ts";
 import { normalizeCompactExtensionStatus, normalizeExtensionStatusValue } from "./powerline-config.ts";
-import { fg, rainbow, applyColor } from "./theme.ts";
+import { fg, applyColor } from "./theme.ts";
 import { getIcons, SEP_DOT, getThinkingText } from "./icons.ts";
 
 function color(ctx: SegmentContext, semantic: SemanticColor, text: string): string {
@@ -40,6 +40,26 @@ function formatDuration(ms: number): string {
 // Segment Implementations
 // ═══════════════════════════════════════════════════════════════════════════
 
+const piSegment: StatusLineSegment = {
+  id: "pi",
+  render(ctx) {
+    const icons = getIcons();
+    const symbol = icons.pi || "Π";
+    return { content: applyColor(ctx.theme, "#76e3ea", symbol), visible: true };
+  },
+};
+
+function modelColorValue(ctx: SegmentContext): `#${string}` {
+  const model = `${ctx.model?.provider ?? ""}/${ctx.model?.id ?? ""}/${ctx.model?.name ?? ""}`.toLowerCase();
+  if (model.includes("gpt") || model.includes("openai") || model.includes("codex")) return "#76e3ea";
+  if (model.includes("glm")) return "#bc8cff";
+  if (model.includes("kimi") || model.includes("moonshot")) return "#7ee787";
+  if (model.includes("deepseek")) return "#58a6ff";
+  if (model.includes("qwen")) return "#ffa657";
+  if (model.includes("claude") || model.includes("anthropic")) return "#d2a8ff";
+  return "#76e3ea";
+}
+
 const modelSegment: StatusLineSegment = {
   id: "model",
   render(ctx) {
@@ -64,7 +84,7 @@ const modelSegment: StatusLineSegment = {
       }
     }
 
-    return { content: color(ctx, "model", content), visible: true };
+    return { content: applyColor(ctx.theme, modelColorValue(ctx), content), visible: true };
   },
 };
 
@@ -193,8 +213,11 @@ const thinkingSegment: StatusLineSegment = {
     const label = levelText[level] || level;
     const content = `think:${label}`;
 
-    if (level === "high" || level === "xhigh") {
-      return { content: rainbow(content), visible: true };
+    if (level === "high") {
+      return { content: applyColor(ctx.theme, "#bc8cff", content), visible: true };
+    }
+    if (level === "xhigh") {
+      return { content: applyColor(ctx.theme, "#d2a8ff", content), visible: true };
     }
 
     if (level === "minimal") {
@@ -429,6 +452,7 @@ const extensionStatusesSegment: StatusLineSegment = {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const SEGMENTS: Record<BuiltinStatusLineSegmentId, StatusLineSegment> = {
+  pi: piSegment,
   model: modelSegment,
   shell_mode: shellModeSegment,
   path: pathSegment,
