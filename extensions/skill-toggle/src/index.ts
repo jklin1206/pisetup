@@ -26,13 +26,4 @@ export default function skillToggle(pi: ExtensionAPI) {
     handler,
   });
 
-  pi.registerCommand("toggle-skills", {
-    description: "Alias for /skill-toggle",
-    handler,
-  });
-
-  pi.registerCommand("skill-togggle", {
-    description: "Typo alias for /skill-toggle",
-    handler,
-  });
 }
