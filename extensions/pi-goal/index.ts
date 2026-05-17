@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { StringEnum } from '@earendil-works/pi-ai'
 import { Type } from 'typebox'
 
-const ROOT = path.join(os.homedir(), '.pi', 'agent', 'pi-goals')
+const ROOT = path.join(os.homedir(), '.pi', 'agent', 'goals')
 const WORKERS_ROOT = path.join(os.homedir(), '.pi', 'agent', 'pi-workers')
 
 type GoalRole = 'scout' | 'researcher' | 'planner' | 'reviewer' | 'worker'
@@ -53,24 +53,47 @@ type IterationRecord = {
   visualNotes?: string
 }
 
+type SchedulerPhase = 'idle' | 'scouting' | 'implementing' | 'reviewing' | 'done' | 'blocked'
+type SchedulerState = {
+  goalId: string
+  phase: SchedulerPhase
+  currentRun?: ScheduledRun
+  scoutHandoff?: string
+  workerHandoff?: string
+  reviewerHandoff?: string
+  updatedAt: string
+}
+
+type ScheduledRun = {
+  id: string
+  role: GoalRole
+  tmuxSession: string
+  runDir: string
+  handoffPath: string
+  completedPath: string
+  exitCodePath: string
+  task: string
+  createdAt: string
+}
+
 const DEFAULT_COORDINATOR_MODEL = 'opencode-go/deepseek-v4-flash'
 // Vision-capable model for screenshot/video evaluation
 const DEFAULT_VISION_MODEL = 'anthropic/claude-sonnet-4'
 
 const ROLE_SUGGESTIONS: Record<string, GoalRole[]> = {
   audit: ['scout', 'reviewer'],
-  research: ['researcher', 'scout'],
-  plan: ['scout', 'planner'],
-  implement: ['scout', 'planner', 'worker'],
+  research: ['researcher'],
+  plan: ['planner'],
+  implement: ['planner', 'reviewer'],
   review: ['reviewer'],
-  fix: ['scout', 'planner', 'worker', 'reviewer'],
-  cleanup: ['scout', 'worker', 'reviewer'],
-  organize: ['scout', 'worker', 'reviewer'],
-  migrate: ['scout', 'planner', 'worker', 'reviewer'],
+  fix: ['planner', 'reviewer'],
+  cleanup: ['scout', 'reviewer'],
+  organize: ['scout', 'reviewer'],
+  migrate: ['planner', 'reviewer'],
   explore: ['scout'],
-  catalog: ['researcher', 'worker'],
-  build: ['scout', 'planner', 'worker', 'reviewer'],
-  default: ['scout', 'planner', 'worker', 'reviewer'],
+  catalog: ['researcher', 'reviewer'],
+  build: ['planner', 'reviewer'],
+  default: [],
 }
 
 function shortId(): string {
@@ -188,6 +211,144 @@ async function stopScreenRecording(pid: string): Promise<void> {
   try {
     process.kill(Number(pid), 'SIGINT')
   } catch { /* may already be dead */ }
+}
+
+function schedulerPath(goalId: string): string {
+  return path.join(ROOT, goalId, 'scheduler.json')
+}
+
+async function readScheduler(goalId: string): Promise<SchedulerState> {
+  try {
+    return JSON.parse(await readFile(schedulerPath(goalId), 'utf8')) as SchedulerState
+  } catch {
+    return { goalId, phase: 'idle', updatedAt: new Date().toISOString() }
+  }
+}
+
+async function writeScheduler(state: SchedulerState) {
+  state.updatedAt = new Date().toISOString()
+  await writeFile(schedulerPath(state.goalId), JSON.stringify(state, null, 2), 'utf8')
+}
+
+async function hasActiveScheduledGoalRun(): Promise<boolean> {
+  const goals = await listGoals()
+  for (const goal of goals) {
+    const state = await readScheduler(goal.id)
+    if (!state.currentRun) continue
+    if (existsSync(state.currentRun.completedPath)) continue
+    const result = await execCmd('tmux', ['has-session', '-t', state.currentRun.tmuxSession], { timeout: 5000 })
+    if (result.code === 0) return true
+  }
+  return false
+}
+
+function scheduledRunsDir(goalId: string): string {
+  return path.join(ROOT, goalId, 'runs')
+}
+
+async function spawnScheduledRun(goal: GoalRecord, role: GoalRole, task: string, cwd: string): Promise<ScheduledRun> {
+  const id = shortId()
+  const runDir = path.join(scheduledRunsDir(goal.id), id)
+  await ensureDir(runDir)
+  const promptPath = path.join(runDir, 'prompt.md')
+  const handoffPath = path.join(runDir, 'handoff.md')
+  const completedPath = path.join(runDir, 'completed')
+  const exitCodePath = path.join(runDir, 'exit-code')
+  const transcriptPath = path.join(runDir, 'transcript.ansi')
+  const runnerPath = path.join(runDir, 'run.sh')
+  const tmuxSession = `goal-${role}-${id}`.replace(/[^a-zA-Z0-9_-]/g, '-')
+  const prompt = `# Goal Scheduler Run
+
+Goal: ${goal.goal}
+Verification: ${goal.verification}
+Constraints: ${goal.constraints || 'none'}
+Role: ${role}
+
+${task}
+
+## Required handoff
+Write your final handoff to exactly:
+${handoffPath}
+
+Include: summary, files inspected, files changed, validation, visual evidence paths, whether goal is met, and next recommended action.`
+  await writeFile(promptPath, prompt, 'utf8')
+  await writeFile(handoffPath, `# Scheduled Goal Handoff — ${role}\n\nStatus: pending\n`, 'utf8')
+  await writeFile(transcriptPath, '', 'utf8')
+  await writeFile(runnerPath, `#!/bin/zsh
+cd ${JSON.stringify(cwd)} || exit 1
+echo "[goal-scheduler] ${goal.id} role=${role} run=${id}"
+pi --model ${JSON.stringify(role === 'worker' ? goal.model : goal.model)} ${JSON.stringify(`@${promptPath}`)}
+code=$?
+date -u +'%Y-%m-%dT%H:%M:%SZ' > ${JSON.stringify(completedPath)}
+echo $code > ${JSON.stringify(exitCodePath)}
+osascript -e 'display notification "goal ${goal.id}: ${role} finished" with title "Goal Scheduler"' 2>/dev/null || true
+exit $code
+`, { encoding: 'utf8', mode: 0o700 })
+  const created = await execCmd('tmux', ['new-session', '-d', '-s', tmuxSession, '-n', role, '-c', cwd, runnerPath])
+  if (created.code !== 0) throw new Error(created.stderr || `tmux failed to start scheduled run`)
+  await execCmd('tmux', ['pipe-pane', '-o', '-t', tmuxSession, `cat >> ${JSON.stringify(transcriptPath)}`])
+  return { id, role, tmuxSession, runDir, handoffPath, completedPath, exitCodePath, task, createdAt: new Date().toISOString() }
+}
+
+async function schedulerTick(ctx: ExtensionContext) {
+  const goals = await listGoals()
+  const goal = goals.find((g) => g.status !== 'done' && g.status !== 'paused' && g.status !== 'blocked')
+  if (!goal) return
+  const state = await readScheduler(goal.id)
+  const evDir = evidenceDir(goal.id, goal.currentIteration || 1)
+  await ensureDir(evDir)
+
+  if (state.currentRun && !existsSync(state.currentRun.completedPath)) return
+
+  if (state.currentRun && existsSync(state.currentRun.completedPath)) {
+    const handoff = existsSync(state.currentRun.handoffPath) ? await readFile(state.currentRun.handoffPath, 'utf8') : ''
+    if (state.currentRun.role === 'scout') state.scoutHandoff = handoff
+    if (state.currentRun.role === 'worker') state.workerHandoff = handoff
+    if (state.currentRun.role === 'reviewer') state.reviewerHandoff = handoff
+    state.currentRun = undefined
+  }
+
+  if (state.phase === 'idle') {
+    goal.status = 'executing'
+    goal.currentIteration = Math.max(goal.currentIteration, 1)
+    await writeGoal(goal)
+    const task = `Scout the codebase for agent navigability. Identify confusing structure, missing Markdown, unclear entry points, dead ends/loops, and exact minimal docs needed. Do not edit project files. Do not capture screenshots from inside this tmux worker; the coordinator captures visual evidence after workers finish. Evidence directory for coordinator use: ${evDir}.`
+    state.currentRun = await spawnScheduledRun(goal, 'scout', task, ctx.cwd)
+    state.phase = 'scouting'
+    await writeScheduler(state)
+    return
+  }
+
+  if (state.phase === 'scouting') {
+    const task = `Using this scout handoff, implement the smallest useful Markdown/navigation improvements. Do not move/delete source files. Prefer root docs, folder READMEs, maps, and agent traversal guidance. Do not capture screenshots from inside this tmux worker; the coordinator captures visual evidence after workers finish. Evidence directory for coordinator use: ${evDir}.
+
+Scout handoff:\n${state.scoutHandoff || '(missing)'}`
+    state.currentRun = await spawnScheduledRun(goal, 'worker', task, ctx.cwd)
+    state.phase = 'implementing'
+    await writeScheduler(state)
+    return
+  }
+
+  if (state.phase === 'implementing') {
+    const task = `Review whether the documentation/navigation changes make the codebase easy for future agents to traverse. Inspect the diff and docs. Do not capture screenshots from inside this tmux worker; the coordinator captures visual evidence after workers finish. Evidence directory for coordinator use: ${evDir}. Mark GOAL_MET: yes/no/partial and list blockers.
+
+Scout handoff:\n${state.scoutHandoff || ''}
+
+Worker handoff:\n${state.workerHandoff || ''}`
+    state.currentRun = await spawnScheduledRun(goal, 'reviewer', task, ctx.cwd)
+    state.phase = 'reviewing'
+    await writeScheduler(state)
+    return
+  }
+
+  if (state.phase === 'reviewing') {
+    const met = /GOAL_MET:\s*yes/i.test(state.reviewerHandoff || '') || /goal (?:is )?met/i.test(state.reviewerHandoff || '')
+    goal.status = met ? 'done' : 'evaluating'
+    await writeGoal(goal)
+    state.phase = met ? 'done' : 'blocked'
+    await writeScheduler(state)
+    await execCmd('osascript', ['-e', `display notification "Goal ${goal.id} ${met ? 'done' : 'needs attention'}" with title "Goal Scheduler"`]).catch(() => {})
+  }
 }
 
 // ─── Worker prompt enhancement: tells workers to capture visual evidence ───
@@ -374,41 +535,42 @@ async function collectEvidence(goalId: string, iteration?: number): Promise<Evid
 
 async function handleGoalCommand(text: string, ctx: ExtensionContext): Promise<string> {
   const trimmed = text.trim()
-  const goalMatch = trimmed.match(/^(?:pi\s+)?goal\s+(.+)$/i) ?? trimmed.match(/^\/goal\s+(.+)$/i)
+  const goalMatch = trimmed.match(/^(?:pi\s+)?goal(?:s)?\s+(.+)$/i) ?? trimmed.match(/^\/goal\s+(.+)$/i)
 
   // ─── Help / no args ───
   if (!goalMatch || /^help$/i.test(goalMatch?.[1] ?? '')) {
     const goals = await listGoals()
     const activeGoal = goals.find((g) => g.status !== 'done' && g.status !== 'paused')
-    let help = `Pi Goal — persistent objective coordinator with visual evidence
+    let help = `Goal — persistent objective coordinator with visual evidence
 
 GOALS ARE NOT JUST TEXT CLAIMS. Every goal requires visual proof:
 screenshots showing the working result, screen recordings of flows,
 and multimodal evaluation that actually looks at the evidence.
 
 Usage:
-  pi goal "<objective>"                  Set a new goal
-  pi goal status                          Show current goal + evidence
-  pi goal pause                           Pause active goal
-  pi goal resume                          Resume paused goal
-  pi goal clear                           Remove current goal
-  pi goal iterate                         Plan next iteration + spawn workers
-  pi goal evaluate                        Evaluate handoffs AND visual evidence
-  pi goal screenshot                      Capture screenshot now (to evidence dir)
-  pi goal screenshot --window             Capture specific window
-  pi goal record-start                    Start screen recording
-  pi goal record-stop <pid>               Stop screen recording
-  pi goal evidence                        List all captured evidence
-  pi goal iterations                      Show iteration history
-  pi goal list                             List all goals
+  goal "<objective>"                  Set a new goal
+  goal status                          Show current goal + evidence
+  goal pause                           Pause active goal
+  goal resume                          Resume paused goal
+  goal clear                           Remove current goal
+  goal iterate                         Create a coordination brief for the current session
+  goal evaluate                        Evaluate handoffs AND visual evidence
+  goal screenshot                      Capture screenshot now (to evidence dir)
+  goal screenshot --window             Capture specific window
+  goal record-start                    Start screen recording
+  goal record-stop <pid>               Stop screen recording
+  goal evidence                        List all captured evidence
+  goal iterations                      Show iteration history
+  goal list                             List all goals
 
 Evidence and verification:
-  Workers are instructed to capture screenshots/video of working results.
-  The evaluation model (default: ${DEFAULT_VISION_MODEL}) uses multimodal
-  vision to confirm the goal is actually achieved — not just that code exists.
+  Capture screenshots/video of the final product or feature working.
+  The current multimodal model, or configured vision model (${DEFAULT_VISION_MODEL}),
+  reviews the visual evidence — not just text claims or worker handoffs.
   Screenshots go to: ~/.pi/agent/pi-goals/<id>/evidence/
 
-Worker evidence instructions are injected into every iterated task.
+Goal is a coordinator, not an automatic worker spawner.
+Use scouts/planners/reviewers only when they reduce context load; avoid implementation workers unless explicitly requested.
 The multimodal evaluator reviews screenshots + recordings and outputs:
   - COMPLETION: percentage
   - GOAL_MET: yes/no/partial
@@ -418,7 +580,7 @@ The multimodal evaluator reviews screenshots + recordings and outputs:
 `
     if (activeGoal) {
       const evidence = await collectEvidence(activeGoal.id)
-      help += `\n\nActive goal:\n  ${activeGoal.id}\n  "${activeGoal.goal}"\n  Status: ${activeGoal.status}\n  Iteration: ${activeGoal.currentIteration}\n  Workers: ${activeGoal.workerIds.length} spawned\n  Evidence: ${evidence.length} files captured\n  Created: ${activeGoal.createdAt}`
+      help += `\n\nActive goal:\n  ${activeGoal.id}\n  "${activeGoal.goal}"\n  Status: ${activeGoal.status}\n  Iteration: ${activeGoal.currentIteration}\n  Delegated runs: ${activeGoal.workerIds.length} recorded\n  Evidence: ${evidence.length} files captured\n  Created: ${activeGoal.createdAt}`
     }
     return help
   }
@@ -429,7 +591,7 @@ The multimodal evaluator reviews screenshots + recordings and outputs:
   if (/^status$/i.test(subcommand)) {
     const goals = await listGoals()
     const activeGoal = goals.find((g) => g.status !== 'done')
-    if (!activeGoal) return 'No active goal. Set one with: pi goal "<objective>"'
+    if (!activeGoal) return 'No active goal. Set one with: goal "<objective>"'
     const iterations = await readIterations(activeGoal.id)
     const elapsed = Date.now() - new Date(activeGoal.createdAt).getTime()
     const completedIterations = iterations.filter((i) => i.completedAt)
@@ -443,7 +605,7 @@ Verification: ${activeGoal.verification}
 Constraints: ${activeGoal.constraints || 'none specified'}
 Status: ${activeGoal.status}
 Iteration: ${activeGoal.currentIteration} (${completedIterations.length}/${iterations.length} subtasks completed)
-Workers spawned: ${activeGoal.workerIds.length}
+Delegated runs recorded: ${activeGoal.workerIds.length}
 Elapsed: ${formatDuration(elapsed)}
 Created: ${activeGoal.createdAt}
 Updated: ${activeGoal.updatedAt}
@@ -452,7 +614,7 @@ Visual Evidence:
   Screenshots: ${screenshots.length}
   Recordings: ${recordings.length}
   Total files: ${evidence.length}
-${screenshots.length > 0 ? screenshots.slice(-5).map((s) => `    📸 ${s.label}: ${s.path}`).join('\n') : '  (none captured yet — run "pi goal screenshot" or spawn workers)'}
+${screenshots.length > 0 ? screenshots.slice(-5).map((s) => `    📸 ${s.label}: ${s.path}`).join('\n') : '  (none captured yet — run "goal screenshot" after there is something visual to verify)'}
 ${recordings.length > 0 ? recordings.map((r) => `    🎬 ${r.label}: ${r.path}`).join('\n') : ''}
 
 ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations.slice(-3).map((i) => `  [${i.iteration}] ${i.role} → ${i.assessment ?? 'no assessment'}${i.visualNotes ? '\n    Visual notes: ' + i.visualNotes.slice(0, 150) : ''}`).join('\n') : 'No iterations completed yet.'}`
@@ -465,7 +627,7 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
     if (!active) return 'No active goal to pause.'
     active.status = 'paused'
     await writeGoal(active)
-    return `Goal ${active.id} paused.\nUse "pi goal resume" to continue.`
+    return `Goal ${active.id} paused.\nUse "goal resume" to continue.`
   }
 
   // ─── Resume ───
@@ -475,7 +637,7 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
     if (!paused) return 'No paused goal to resume.'
     paused.status = 'executing'
     await writeGoal(paused)
-    return `Goal ${paused.id} resumed.\nReady to iterate. Use "pi goal iterate" to plan next iteration.`
+    return `Goal ${paused.id} resumed.\nReady to iterate. Use "goal iterate" to plan next iteration.`
   }
 
   // ─── Clear ───
@@ -516,7 +678,7 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
     const active = goals.find((g) => g.status !== 'done') ?? goals[0]
     if (!active) return 'No goal found.'
     const evidence = await collectEvidence(active.id)
-    if (evidence.length === 0) return `No visual evidence for goal ${active.id} yet.\n\nCapture evidence with:\n  pi goal screenshot\n  pi goal screenshot --window\n  pi goal record-start\n\nWorkers also capture evidence automatically during iterations.`
+    if (evidence.length === 0) return `No visual evidence for goal ${active.id} yet.\n\nCapture evidence when the final product/feature is visible:\n  goal screenshot\n  goal screenshot --window\n  goal record-start`
     return `Visual evidence for goal ${active.id}:\n\n` + evidence.map((e) =>
       `${e.type === 'screenshot' ? '📸' : e.type === 'recording' ? '🎬' : '📄'} ${e.label}\n  Path: ${e.path}\n  Captured: ${e.capturedAt}${e.description ? `\n  ${e.description}` : ''}`
     ).join('\n\n')
@@ -535,7 +697,7 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
     const useWindow = /--window/.test(subcommand)
     const success = useWindow ? await captureWindowScreenshot(outputPath) : await captureScreenshot(outputPath)
     if (success && existsSync(outputPath)) {
-      await execCmd('osascript', ['-e', `display notification "Screenshot saved for goal ${active.id}" with title "Pi Goal"`], {}).catch(() => {})
+      await execCmd('osascript', ['-e', `display notification "Screenshot saved for goal ${active.id}" with title "Goal"`], {}).catch(() => {})
       return `📸 Screenshot captured!\n\nPath: ${outputPath}\nGoal: ${active.id}\nIteration: ${active.currentIteration || 1}\n\nView with: open "${outputPath}"`
     }
     return `Failed to capture screenshot. On macOS, ensure:\n- Screen recording permission is granted to Terminal/Pi\n- Use --window flag to select a specific window\n- Or capture manually and save to: ${evDir}/`
@@ -552,7 +714,7 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
     const outputPath = path.join(evDir, `recording-${timestamp}.mp4`)
     const pid = await startScreenRecording(outputPath)
     if (pid) {
-      return `🎬 Recording started (PID: ${pid})!\n\nOutput: ${outputPath}\nGoal: ${active.id}\n\nStop with: pi goal record-stop ${pid}\n\nNote: Requires ffmpeg and screen recording permission for Terminal.`
+      return `🎬 Recording started (PID: ${pid})!\n\nOutput: ${outputPath}\nGoal: ${active.id}\n\nStop with: goal record-stop ${pid}\n\nNote: Requires ffmpeg and screen recording permission for Terminal.`
     }
     return `Could not start recording (ffmpeg not found or permission denied).\n\nInstall ffmpeg: brew install ffmpeg\nGrant screen recording permission: System Settings → Privacy & Security → Screen Recording\n\nAlternative: Use macOS Screenshot toolbar (Cmd+Shift+5) to record screen, then save the file to:\n${evDir}/`
   }
@@ -560,20 +722,20 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
   // ─── Record stop ───
   if (/^record-stop\s+(\S+)/i.test(subcommand)) {
     const pidMatch = subcommand.match(/^record-stop\s+(\S+)$/i)
-    if (!pidMatch) return 'Usage: pi goal record-stop <pid>'
+    if (!pidMatch) return 'Usage: goal record-stop <pid>'
     const pid = pidMatch[1]
     await stopScreenRecording(pid)
     const goals = await listGoals()
     const active = goals.find((g) => g.status !== 'done' && g.status !== 'paused')
-    await execCmd('osascript', ['-e', `display notification "Recording stopped for goal ${active?.id ?? 'unknown'}" with title "Pi Goal"`], {}).catch(() => {})
-    return `🎬 Recording stopped (PID: ${pid}).\n\nAllow a few seconds for ffmpeg to finalize the file.\nCheck evidence with: pi goal evidence`
+    await execCmd('osascript', ['-e', `display notification "Recording stopped for goal ${active?.id ?? 'unknown'}" with title "Goal"`], {}).catch(() => {})
+    return `🎬 Recording stopped (PID: ${pid}).\n\nAllow a few seconds for ffmpeg to finalize the file.\nCheck evidence with: goal evidence`
   }
 
   // ─── Iterate ───
   if (/^iterate$/i.test(subcommand)) {
     const goals = await listGoals()
     const active = goals.find((g) => g.status !== 'done' && g.status !== 'paused')
-    if (!active) return 'No active goal. Set one with: pi goal "<objective>"'
+    if (!active) return 'No active goal. Set one with: goal "<objective>"'
 
     const roles = suggestRoles(active.goal)
     const iteration = active.currentIteration + 1
@@ -595,38 +757,48 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
       ? `\nPrevious visual evidence:\n${previousEvidence.map((e) => `- ${e.type}: ${e.path}`).join('\n')}`
       : ''
 
-    const task = `Iteration ${iteration} for goal: "${active.goal}"
+    const brief = `Iteration ${iteration} coordination brief for goal: "${active.goal}"
 
 Verification: ${active.verification}
 ${active.constraints ? `Constraints: ${active.constraints}` : ''}
 
-${previousHandoffs ? `Previous iteration results:\n${previousHandoffs}` : 'First iteration — no prior work done.'}
+${previousHandoffs ? `Previous delegated results:\n${previousHandoffs}` : 'First iteration — no prior delegated work recorded.'}
 ${evidenceList}
+
+Recommended operating mode:
+- Keep ownership in the current Pi session.
+- Use local tools directly first: read, bash, edit/write, web/github/video tools as needed.
+- Pull in a scout/researcher/planner/reviewer worker only when it reduces context load or risk.
+- Do NOT use implementation workers by default; they can blow the context window and lose ownership.
+- If delegation is useful, delegate narrow read-only tasks first: map files, research docs, critique plan, review diff.
+- Capture visual evidence of the final product/feature, not the worker terminal.
 
 ${evidenceInstructions(active.id, iteration)}
 
-Perform your role: ${roles.join(', ')}.
+Suggested optional helper roles: ${roles.length > 0 ? roles.join(', ') : 'none by default — use current-session tools first'}.
 
-Write your handoff to the run's handoff.md including:
-1. What you found/did
-2. Whether the goal is met (with evidence)
-3. What remains to be done
-4. Suggested next iteration roles and tasks
-5. List all screenshots/recording paths you captured`
+Current-session checklist:
+1. Decide the smallest next action.
+2. Inspect only relevant files/sources.
+3. Implement directly in this session if implementation is needed.
+4. Validate with focused tests/checks.
+5. Capture screenshots/recording of the result.
+6. Run goal evaluate / evaluate-visual.`
 
     active.currentIteration = iteration
     await writeGoal(active)
 
     return `Iteration ${iteration} for goal ${active.id}
 
-Suggested roles: ${roles.join(', ')}
+Suggested optional helper roles: ${roles.length > 0 ? roles.join(', ') : 'none by default'}
 Evidence dir: ${evDir}
-Task template includes visual evidence capture instructions.
 
-Spawn workers with:
-${roles.map((role) => `  pi worker ${role} "${task.replace(/"/g, '\\"').slice(0, 200)}..." `).join('\n')}
+${brief}
 
-Or use: pi goal evaluate (after workers complete)`
+If you choose to delegate, prefer narrow read-only helpers, for example:
+${roles.length > 0 ? roles.map((role) => `  worker ${role} "Read-only helper for goal ${active.id}: ${active.goal}. Return concise findings only; do not implement."`).join('\n') : '  (no worker suggested for this goal yet)'}
+
+Otherwise continue in the current session and use goal evaluate / evaluate-visual when evidence exists.`
   }
 
   // ─── Evaluate ───
@@ -640,7 +812,7 @@ Or use: pi goal evaluate (after workers complete)`
     const allEvidence = await collectEvidence(active.id)
 
     if (completedIterations.length === 0 && allEvidence.length === 0) {
-      return `No completed iterations or visual evidence for goal ${active.id}.\nSpawn workers first, then evaluate after handoffs and screenshots arrive.`
+      return `No delegated handoffs or visual evidence for goal ${active.id}.\nContinue in the current session, then capture evidence with:\n  goal screenshot\n  goal screenshot --window\n  goal record-start`
     }
 
     // Read latest handoffs
@@ -669,13 +841,13 @@ Or use: pi goal evaluate (after workers complete)`
     if (metIteration && screenshots.length > 0) {
       active.status = 'done'
       await writeGoal(active)
-      await execCmd('osascript', ['-e', `display notification "✅ Goal achieved: ${active.goal.slice(0, 80)}" with title "Pi Goal"`], {}).catch(() => {})
+      await execCmd('osascript', ['-e', `display notification "✅ Goal achieved: ${active.goal.slice(0, 80)}" with title "Goal"`], {}).catch(() => {})
 
       return `✅ Goal achieved with visual proof!
 
 Goal: ${active.goal}
 Iterations: ${active.currentIteration}
-Workers: ${active.workerIds.length}
+Delegated runs: ${active.workerIds.length}
 
 Visual Evidence:
   ${screenshots.length} screenshots, ${recordings.length} recordings
@@ -687,9 +859,9 @@ Text handoff marking goal as met:
 ${handoffSummaries.join('\n\n')}
 
 To do a full multimodal evaluation, run:
-  pi goal evaluate-visual
+  goal evaluate-visual
 
-Use "pi goal clear" to close the completed goal.`
+Use "goal clear" to close the completed goal.`
     }
 
     // Check for blocked
@@ -697,7 +869,7 @@ Use "pi goal clear" to close the completed goal.`
     if (blockedIteration) {
       active.status = 'blocked'
       await writeGoal(active)
-      await execCmd('osascript', ['-e', `display notification "⚠️ Goal blocked: ${active.goal.slice(0, 70)}" with title "Pi Goal"`], {}).catch(() => {})
+      await execCmd('osascript', ['-e', `display notification "⚠️ Goal blocked: ${active.goal.slice(0, 70)}" with title "Goal"`], {}).catch(() => {})
       return `⚠️ Goal blocked!
 
 Goal: ${active.goal}
@@ -705,9 +877,9 @@ Blocked at iteration ${blockedIteration.iteration} (${blockedIteration.role}):
 ${blockedIteration.assessment}
 
 Suggestions:
-- Address the blocker and run "pi goal iterate"
-- Run "pi goal pause" to pause
-- Run "pi goal clear" to abandon`
+- Address the blocker and run "goal iterate"
+- Run "goal pause" to pause
+- Run "goal clear" to abandon`
     }
 
     // Not met yet — report progress with available evidence
@@ -715,24 +887,25 @@ Suggestions:
     await writeGoal(active)
 
     const evidenceReport = screenshots.length > 0
-      ? `\n\nVisual evidence captured:\n${screenshots.map((s) => `  📸 ${s.label}: ${s.path}`).join('\n')}\n${recordings.length > 0 ? recordings.map((r) => `  🎬 ${r.label}: ${r.path}`).join('\n') : ''}\n\nTo evaluate with multimodal vision, run:\n  pi goal evaluate-visual`
-      : '\n\n⚠️  No screenshots or recordings captured yet!\nCapture evidence with:\n  pi goal screenshot\n  pi goal screenshot --window\n  pi goal record-start'
+      ? `\n\nVisual evidence captured:\n${screenshots.map((s) => `  📸 ${s.label}: ${s.path}`).join('\n')}\n${recordings.length > 0 ? recordings.map((r) => `  🎬 ${r.label}: ${r.path}`).join('\n') : ''}\n\nTo evaluate with multimodal vision, run:\n  goal evaluate-visual`
+      : '\n\n⚠️  No screenshots or recordings captured yet!\nCapture evidence with:\n  goal screenshot\n  goal screenshot --window\n  goal record-start'
 
     return `Goal not yet met.
 
 Goal: ${active.goal}
 Verification: ${active.verification}
 Iterations completed: ${completedIterations.length}
-Workers spawned: ${active.workerIds.length}
+Delegated runs recorded: ${active.workerIds.length}
 
 Latest handoffs:
 ${handoffSummaries.join('\n\n')}
 ${evidenceReport}
 
 Next steps:
-- Run "pi goal screenshot" or instruct workers to capture visual evidence
-- Run "pi goal evaluate-visual" for multimodal evaluation of screenshots
-- Run "pi goal iterate" to plan next iteration`
+- Continue in the current session or delegate a narrow read-only helper if needed
+- Run "goal screenshot" / "goal record-start" when the product/feature is visible
+- Run "goal evaluate-visual" for multimodal evaluation of screenshots
+- Run "goal iterate" for the next coordination brief`
   }
 
   // ─── Evaluate-visual ───
@@ -745,7 +918,7 @@ Next steps:
     const evidencePaths = allEvidence.map((e) => e.path).filter((p) => existsSync(p))
 
     if (evidencePaths.length === 0) {
-      return `No visual evidence to evaluate for goal ${active.id}.\n\nCapture screenshots first:\n  pi goal screenshot\n  pi goal screenshot --window\n\nOr spawn workers with "pi goal iterate" (workers include evidence capture instructions).`
+      return `No visual evidence to evaluate for goal ${active.id}.\n\nCapture screenshots first:\n  goal screenshot\n  goal screenshot --window\n\nGoal evaluates the final product/feature, not worker terminals.`
     }
 
     // Generate the multimodal evaluation instructions
@@ -772,22 +945,22 @@ Option 1 — Ask your current Pi session to review the evidence:
    Verification: ${active.verification}
    Evidence: ${evidencePaths.join(', ')}"
 
-Option 2 — Spawn a reviewer worker with the evaluation prompt:
-  pi worker reviewer --model ${active.visionModel} "Evaluate goal evidence: ${active.goal}. Review all screenshots in ${evidenceDir(active.id)} and determine if the goal is met. Use the evaluation prompt in the goal directory."
+Option 2 — If you explicitly want a separate reviewer, spawn a narrow read-only reviewer:
+  worker reviewer --model ${active.visionModel} "Read-only visual review for goal ${active.id}: ${active.goal}. Review screenshots in ${evidenceDir(active.id)} and return concise GOAL_MET/COMPLETION/VISUAL_NOTES. Do not implement."
 
 Option 3 — View the evidence yourself:
 ${evidencePaths.slice(0, 10).map((p) => `  open "${p}"`).join('\n')}
 
 After evaluation, update the goal:
-  pi goal note "VISUAL_NOTES: <your observations>"
-  pi goal note "COMPLETION: <percentage>"
-  pi goal note "GOAL_MET: <yes|no|partial>"`
+  goal note "VISUAL_NOTES: <your observations>"
+  goal note "COMPLETION: <percentage>"
+  goal note "GOAL_MET: <yes|no|partial>"`
   }
 
   // ─── Note ───
   if (/^note\s+(.+)$/i.test(subcommand)) {
     const noteMatch = subcommand.match(/^note\s+(.+)$/i)
-    if (!noteMatch) return 'Usage: pi goal note "<note text>"'
+    if (!noteMatch) return 'Usage: goal note "<note text>"'
     const noteContent = noteMatch[1]
     const goals = await listGoals()
     const active = goals.find((g) => g.status !== 'done' && g.status !== 'paused')
@@ -804,14 +977,14 @@ After evaluation, update the goal:
       if (pct && parseInt(pct) >= 100) {
         active.status = 'done'
         await writeGoal(active)
-        await execCmd('osascript', ['-e', `display notification "Goal achieved: ${active.goal.slice(0, 80)}" with title "Pi Goal"`], {}).catch(() => {})
+        await execCmd('osascript', ['-e', `display notification "Goal achieved: ${active.goal.slice(0, 80)}" with title "Goal"`], {}).catch(() => {})
         return `Note recorded. COMPLETION: ${pct}% → Goal marked as done! 🎉\n\n${noteContent}`
       }
     }
     if (/^GOAL_MET:\s*yes/i.test(noteContent)) {
       active.status = 'done'
       await writeGoal(active)
-      await execCmd('osascript', ['-e', `display notification "Goal achieved: ${active.goal.slice(0, 80)}" with title "Pi Goal"`], {}).catch(() => {})
+      await execCmd('osascript', ['-e', `display notification "Goal achieved: ${active.goal.slice(0, 80)}" with title "Goal"`], {}).catch(() => {})
       return `Note recorded. GOAL_MET: yes → Goal marked as done! 🎉\n\n${noteContent}`
     }
     if (/^GOAL_MET:\s*blocked/i.test(noteContent)) {
@@ -824,7 +997,7 @@ After evaluation, update the goal:
   }
 
   // ─── Set a new goal ───
-  const goalText = trimmed.replace(/^pi\s+goal\s+/i, '').replace(/^\/goal\s+/i, '')
+  const goalText = trimmed.replace(/^(?:pi\s+)?goal(?:s)?\s+/i, '').replace(/^\/goal\s+/i, '')
 
   let verification = ''
   let constraints = ''
@@ -856,7 +1029,7 @@ After evaluation, update the goal:
     cleanGoal = cleanGoal.slice(1, -1)
   }
 
-  if (!cleanGoal) return 'Please provide a goal objective. Example: pi goal "Fix all vault policy conflicts"'
+  if (!cleanGoal) return 'Please provide a goal objective. Example: goal "Fix all vault policy conflicts"'
 
   if (!verification) verification = inferVerification(cleanGoal)
 
@@ -882,7 +1055,7 @@ After evaluation, update the goal:
   await writeIterations(id, [])
 
   // Write goal markdown with evidence emphasis
-  await writeFile(path.join(ROOT, id, 'goal.md'), `# Pi Goal
+  await writeFile(path.join(ROOT, id, 'goal.md'), `# Goal
 
 ## Objective
 
@@ -898,7 +1071,7 @@ ${constraints ? `## Constraints\n\n${constraints}` : ''}
 
 This goal requires **visual proof of completion**, not just text claims.
 
-Workers are instructed to capture:
+Capture:
 - **Screenshots** of the working result at every key state
 - **Screen recordings** of interactive flows (forms, transitions, multi-step processes)
 - **Evidence manifest** listing all captured files with labels
@@ -923,11 +1096,11 @@ ${evidenceDir(id)}/
 
 ## Iterations
 
-(No iterations yet. Run "pi goal iterate" to plan the first iteration.)
+(No iterations yet. Run "goal iterate" to create the first coordination brief.)
 
 ## Notes
 
-(Use "pi goal note <text>" to add evaluation notes.)
+(Use "goal note <text>" to add evaluation notes.)
 `, 'utf8')
 
   // Write evaluation prompt
@@ -938,34 +1111,19 @@ ${evidenceDir(id)}/
   return `Goal created: ${id}
 
 Objective: ${cleanGoal}
-Verification: ${verification}
-Constraints: ${constraints || 'none'}
-Max iterations: ${maxIterations}
-Coordinator model: ${model}
-Vision model: ${visionModel}
-Suggested roles: ${roles.join(', ')}
+Evidence dir: ${evidenceDir(id)}
+Optional helper roles: ${roles.length > 0 ? roles.join(', ') : 'none by default'}
 
-📸 Visual evidence capture: ENABLED
-   Workers will be instructed to capture screenshots/video
-   Evidence dir: ${evidenceDir(id)}
-
-Next steps:
-1. Run "pi goal iterate" to plan the first iteration
-2. Workers will capture screenshots of working results
-3. Run "pi goal screenshot" to manually capture evidence
-4. Run "pi goal evaluate" to check progress
-5. Run "pi goal evaluate-visual" for multimodal review of screenshots
-6. Run "pi goal note VISUAL_NOTES: ..." to record visual evaluation
-
-The goal is only "done" when there is VISUAL PROOF — not just a text handoff.`
+Goal is now tracking this objective. It will not auto-spawn workers.
+Use current-session tools first. Run "goal iterate" for a coordination brief, and delegate only narrow scout/research/planner/reviewer work when useful.`
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerCommand('pi-goal', {
+  pi.registerCommand('goal', {
     description: 'Set and manage persistent goals with visual evidence verification',
     handler: async (args, ctx) => {
       try {
-        const result = await handleGoalCommand(`pi goal ${args}`, ctx)
+        const result = await handleGoalCommand(`goal ${args}`, ctx)
         ctx.ui.notify(result, 'info')
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error')
@@ -974,7 +1132,7 @@ export default function (pi: ExtensionAPI) {
   })
 
   pi.on('input', async (event, ctx) => {
-    if (!/^pi\s+goal(?:s)?\b/i.test(event.text.trim()) && !/^\/goal\b/i.test(event.text.trim())) return { action: 'continue' }
+    if (!/^(?:pi\s+)?goal(?:s)?\b/i.test(event.text.trim()) && !/^\/goal\b/i.test(event.text.trim())) return { action: 'continue' }
     try {
       const result = await handleGoalCommand(event.text, ctx)
       ctx.ui.notify(result, 'info')
@@ -985,17 +1143,20 @@ export default function (pi: ExtensionAPI) {
   })
 
   pi.registerTool({
-    name: 'pi_goal',
-    label: 'Pi Goal',
+    name: 'goal',
+    label: 'Goal',
     description: 'Set and manage persistent goals with visual evidence verification. Goals require screenshot/recording proof that the result actually works, not just text claims. A multimodal vision model evaluates the visual evidence to confirm completion.',
     promptSnippet: 'Set and manage persistent goals with visual evidence verification',
     promptGuidelines: [
-      'Use pi_goal when the user wants to achieve a multi-step objective with verifiable results.',
+      'Use goal when the user wants to achieve a multi-step objective with verifiable results.',
+      'Goal is a lightweight coordinator/evaluator, not an automatic worker spawner.',
+      'Use current-session tools first. Pull in scout/researcher/planner/reviewer workers only when they reduce context load or risk.',
+      'Do not use implementation workers by default; only spawn worker role if the user explicitly requests delegated implementation.',
+      'Keep goal creation responses concise; do not dump long next-step instructions unless asked.',
       'Every goal requires VISUAL EVIDENCE — screenshots and/or screen recordings showing the working result.',
-      'Workers are instructed to capture screenshots at every key state and recordings of interactive flows.',
       'The evaluation model uses multimodal vision to confirm: does it actually work, not just does the code exist.',
-      'Use pi_goal screenshot to manually capture evidence at any time.',
-      'Use pi_goal evaluate-visual to trigger a vision model review of captured evidence.',
+      'Use goal screenshot to manually capture evidence at any time.',
+      'Use goal evaluate-visual to trigger a vision model review of captured evidence.',
     ],
     parameters: Type.Object({
       action: StringEnum(['set', 'status', 'pause', 'resume', 'clear', 'iterate', 'evaluate', 'evaluate-visual', 'screenshot', 'record-start', 'record-stop', 'evidence', 'list', 'iterations', 'note'] as const),
@@ -1014,32 +1175,32 @@ export default function (pi: ExtensionAPI) {
       if (params.action === 'set') {
         if (!params.goal) throw new Error('set requires goal text')
         const goalText = `${params.goal}${params.verification ? ` --verify "${params.verification}"` : ''}${params.constraints ? ` --constraints "${params.constraints}"` : ''}${params.maxIterations ? ` --max-iterations ${params.maxIterations}` : ''}${params.model ? ` --model ${params.model}` : ''}${params.visionModel ? ` --vision-model ${params.visionModel}` : ''}`
-        const result = await handleGoalCommand(`pi goal ${goalText}`, ctx)
+        const result = await handleGoalCommand(`goal ${goalText}`, ctx)
         return { content: [{ type: 'text', text: result }] }
       }
 
       if (params.action === 'screenshot') {
-        const result = await handleGoalCommand('pi goal screenshot', ctx)
+        const result = await handleGoalCommand('goal screenshot', ctx)
         return { content: [{ type: 'text', text: result }] }
       }
 
       if (params.action === 'evidence') {
-        const result = await handleGoalCommand('pi goal evidence', ctx)
+        const result = await handleGoalCommand('goal evidence', ctx)
         return { content: [{ type: 'text', text: result }] }
       }
 
       // All other actions delegate
-      const commandText = `pi goal ${params.action}`
+      const commandText = `goal ${params.action}`
       const result = await handleGoalCommand(commandText, ctx)
       return { content: [{ type: 'text', text: result }] }
     },
   })
 
   pi.on('session_start', (_event, ctx) => {
-    if (ctx.hasUI) ctx.ui.setStatus('pi-goal', 'pi-goal ready')
+    if (ctx.hasUI) ctx.ui.setStatus('goal', 'goal ready')
   })
 
   pi.on('session_shutdown', (_event, ctx) => {
-    if (ctx.hasUI) ctx.ui.setStatus('pi-goal', undefined)
+    if (ctx.hasUI) ctx.ui.setStatus('goal', undefined)
   })
 }
