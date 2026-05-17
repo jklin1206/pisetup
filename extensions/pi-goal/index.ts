@@ -9,6 +9,9 @@ import { Type } from 'typebox'
 
 const ROOT = path.join(os.homedir(), '.pi', 'agent', 'goals')
 const WORKERS_ROOT = path.join(os.homedir(), '.pi', 'agent', 'pi-workers')
+const HERD_ROOT = path.join(os.homedir(), '.pi', 'agent', 'herd')
+const HERD_STATE_PATH = path.join(HERD_ROOT, 'state.json')
+const HERD_SESSION = 'pi'
 
 type GoalRole = 'scout' | 'researcher' | 'planner' | 'reviewer' | 'worker'
 type GoalStatus = 'planning' | 'executing' | 'evaluating' | 'done' | 'blocked' | 'paused'
@@ -41,6 +44,7 @@ type EvidenceItem = {
 type IterationRecord = {
   iteration: number
   role: GoalRole
+  backend?: 'current' | 'herd' | 'subagent' | 'tmux'
   workerId: string
   workerTask: string
   startedAt: string
@@ -51,6 +55,7 @@ type IterationRecord = {
   evidence: EvidenceItem[]
   /** Multimodal evaluation notes from the vision model */
   visualNotes?: string
+  agentName?: string
 }
 
 type SchedulerPhase = 'idle' | 'scouting' | 'implementing' | 'reviewing' | 'done' | 'blocked'
@@ -112,6 +117,14 @@ function execCmd(command: string, args: string[], opts: { cwd?: string; timeout?
   })
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+function parseJson<T = any>(text: string): T | null {
+  try { return JSON.parse(text) as T } catch { return null }
+}
+
 async function ensureDir(p: string) {
   await mkdir(p, { recursive: true })
 }
@@ -140,6 +153,116 @@ async function readIterations(id: string): Promise<IterationRecord[]> {
 
 async function writeIterations(id: string, iterations: IterationRecord[]) {
   await writeFile(path.join(ROOT, id, 'iterations.json'), JSON.stringify(iterations, null, 2), 'utf8')
+}
+
+type HerdState = { session?: string; workspaceId?: string; workspaceLabel?: string }
+
+async function readHerdState(): Promise<HerdState> {
+  try { return JSON.parse(await readFile(HERD_STATE_PATH, 'utf8')) as HerdState } catch { return {} }
+}
+
+async function herdr(args: string[], opts: { timeout?: number; cwd?: string; session?: string } = {}) {
+  return execCmd('herdr', ['--session', opts.session ?? HERD_SESSION, ...args], { cwd: opts.cwd, timeout: opts.timeout ?? 30000 })
+}
+
+async function ensureHerdWorkspace(cwd: string, label: string): Promise<{ session: string; workspaceId: string }> {
+  const installed = await execCmd('bash', ['-lc', 'command -v herdr'], { timeout: 5000 })
+  if (installed.code !== 0) throw new Error('Herdr is not installed. Run /herd install first.')
+  await execCmd('herdr', ['integration', 'install', 'pi'], { timeout: 20000 }).catch(() => undefined)
+
+  const state = await readHerdState()
+  const session = state.session || HERD_SESSION
+  if (state.workspaceId) return { session, workspaceId: state.workspaceId }
+
+  const created = await herdr(['workspace', 'create', '--cwd', cwd, '--label', label, '--no-focus'], { session, cwd, timeout: 15000 })
+  if (created.code !== 0) {
+    throw new Error(`Herdr is installed, but no running Herd cockpit/workspace was found. Run /herd boot, then retry. Details: ${created.stderr || created.stdout}`)
+  }
+  const parsed = parseJson<any>(created.stdout)
+  const workspaceId = parsed?.result?.workspace?.workspace_id ?? parsed?.workspace?.workspace_id
+  if (!workspaceId) throw new Error(`Could not parse Herdr workspace id. Run /herd boot, then retry.`)
+  return { session, workspaceId }
+}
+
+function roleModel(role: GoalRole, goal: GoalRecord): string | null {
+  if (role === 'scout') return 'opencode-go/deepseek-v4-flash'
+  if (role === 'researcher') return 'opencode-go/kimi-k2.6'
+  if (role === 'planner' || role === 'reviewer') return 'opencode-go/glm-5.1'
+  return goal.model || null
+}
+
+function goalRoleTask(goal: GoalRecord, role: GoalRole, iteration: number, evDir: string): string {
+  const base = `Goal: ${goal.goal}\nVerification: ${goal.verification}\nConstraints: ${goal.constraints || 'none'}\nIteration: ${iteration}\nEvidence dir: ${evDir}\n\n`
+  if (role === 'scout') return base + 'Map the relevant project context for this goal. Read narrowly. Do not edit. Return key files, risks, unknowns, and the smallest next actions.'
+  if (role === 'researcher') return base + 'Research the relevant docs/sources and local constraints. Do not edit. Return cited findings, practical implications, confidence, and gaps.'
+  if (role === 'planner') return base + 'Create a concrete implementation plan. Include likely files, exact steps, validation, risks, and open decisions. Do not edit.'
+  if (role === 'reviewer') return base + 'Review current state/diff against the goal. Do not edit. Return severity-ranked findings, evidence, validation gaps, and whether the goal appears met.'
+  return base + 'Implement the requested goal in this visible Herd worker only because the user explicitly chose Herd/worker mode. Make focused changes, validate, and write a handoff.'
+}
+
+async function startHerdGoalRun(goal: GoalRecord, role: GoalRole, iteration: number, cwd: string): Promise<IterationRecord> {
+  const evDir = evidenceDir(goal.id, iteration)
+  await ensureDir(evDir)
+  const { session, workspaceId } = await ensureHerdWorkspace(cwd, `Goal ${goal.id}`)
+  const runId = shortId()
+  const agentName = `g-${role}-${runId}`.slice(0, 48)
+  const runDir = path.join(ROOT, goal.id, 'herd', runId)
+  await ensureDir(runDir)
+  const systemPath = path.join(runDir, 'system.md')
+  const promptPath = path.join(runDir, 'prompt.md')
+  const handoffPath = path.join(runDir, 'handoff.md')
+  const task = goalRoleTask(goal, role, iteration, evDir)
+  await writeFile(systemPath, `You are a visible Herd ${role} for Pi Goal ${goal.id}. You run in a real Herdr terminal, so the user/main agent can inspect, attach, interrupt, wait, and read your output.\n\nAlways write your final handoff to exactly:\n${handoffPath}\n\nDo not claim the goal is complete without the required visual evidence. Visual evidence should prove the final product/feature, not your terminal.\n`, 'utf8')
+  await writeFile(promptPath, `# Herd Goal Run\n\n${task}\n\n## Required handoff\nWrite final handoff to:\n${handoffPath}\n\nInclude: summary, files inspected, files changed, commands run, validation, blockers, evidence paths, and GOAL_MET: yes/no/partial.\n`, 'utf8')
+  await writeFile(handoffPath, `# Herd Goal Handoff — ${role}\n\nStatus: running\n\nTask:\n${task}\n`, 'utf8')
+
+  const model = roleModel(role, goal)
+  const command = [
+    'cd', shellQuote(cwd), '|| exit 1;',
+    `SYSTEM_PROMPT=$(cat ${shellQuote(systemPath)});`,
+    'pi',
+    model ? `--model ${shellQuote(model)}` : '',
+    '--append-system-prompt "$SYSTEM_PROMPT"',
+    shellQuote(`@${promptPath}`),
+  ].filter(Boolean).join(' ')
+
+  const started = await herdr([
+    'agent', 'start', agentName,
+    '--cwd', cwd,
+    '--workspace', workspaceId,
+    '--split', 'right',
+    '--no-focus',
+    '--', 'bash', '-lc', command,
+  ], { session, cwd, timeout: 20000 })
+  if (started.code !== 0) throw new Error(`Herdr agent start failed: ${started.stderr || started.stdout}`)
+
+  return {
+    iteration,
+    role,
+    backend: 'herd',
+    workerId: agentName,
+    agentName,
+    workerTask: task,
+    startedAt: new Date().toISOString(),
+    handoffPath,
+    evidence: [],
+  }
+}
+
+async function readHerdGoalOutput(target: string, lines = 100): Promise<string> {
+  const state = await readHerdState()
+  const session = state.session || HERD_SESSION
+  const result = await herdr(['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)], { session, timeout: 10000 })
+  if (result.code !== 0) throw new Error(result.stderr || result.stdout || 'Herd read failed')
+  return result.stdout.trim() || '(no recent output)'
+}
+
+async function waitHerdGoalOutput(target: string, timeout = 600000): Promise<string> {
+  const state = await readHerdState()
+  const session = state.session || HERD_SESSION
+  const result = await herdr(['agent', 'wait', target, '--status', 'idle', '--timeout', String(timeout)], { session, timeout: timeout + 5000 })
+  if (result.code !== 0) throw new Error(result.stderr || result.stdout || 'Herd wait failed')
+  return readHerdGoalOutput(target, 120)
 }
 
 function suggestRoles(goalText: string): GoalRole[] {
@@ -310,7 +433,10 @@ exit $code
   return { id, role, tmuxSession, runDir, handoffPath, completedPath, exitCodePath, task, createdAt: new Date().toISOString() }
 }
 
-async function schedulerTick(ctx: ExtensionContext) {
+// NOTE: The auto-scheduler is disabled in favor of pi-subagents orchestration.
+// The parent agent now uses subagent() programmatically instead of tmux workers.
+// Goal tracking (iterate, evaluate, visual evidence) remains active.
+async function schedulerTick_disabled(ctx: ExtensionContext) {
   const goals = await listGoals()
   const goal = goals.find((g) => g.status !== 'done' && g.status !== 'paused' && g.status !== 'blocked')
   if (!goal) return
@@ -576,6 +702,9 @@ Usage:
   goal resume                          Resume paused goal
   goal clear                           Remove current goal
   goal iterate                         Create a coordination brief for the current session
+  goal iterate --mode herd [--role reviewer]  Start a visible Herdr worker for this iteration
+  goal iterate --mode subagent         Create a hidden-subagent routing brief (does not auto-run)
+  goal herd list/read/wait <agent>      Inspect or wait on visible Herd goal workers
   goal evaluate                        Evaluate handoffs AND visual evidence
   goal screenshot                      Capture screenshot now (to evidence dir)
   goal screenshot --window             Capture specific window
@@ -593,8 +722,8 @@ Evidence and verification:
   reviews the visual evidence — not just text claims or worker handoffs.
   Screenshots go to: ~/.pi/agent/pi-goals/<id>/evidence/
 
-Goal is a coordinator, not an automatic worker spawner.
-Use scouts/planners/reviewers only when they reduce context load; avoid implementation workers unless explicitly requested.
+Goal is a coordinator/evaluator. It can use current-session work, visible Herd workers, or hidden subagents.
+Defaults: current session first; Herd for visible long-running work; hidden subagents only for narrow advisory tasks.
 The multimodal evaluator reviews screenshots + recordings and outputs:
   - COMPLETION: percentage
   - GOAL_MET: yes/no/partial
@@ -693,7 +822,7 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
     const iterations = await readIterations(active.id)
     if (iterations.length === 0) return `No iterations for goal ${active.id} yet.`
     return `Iterations for goal ${active.id}:\n` + iterations.map((i) =>
-      `[${i.iteration}] ${i.role} (${i.workerId})\n  Task: ${i.workerTask.slice(0, 120)}\n  Status: ${i.completedAt ? 'completed' : 'pending'}\n  Evidence: ${i.evidence.length} files${i.evidence.length > 0 ? ` (${i.evidence.filter((e) => e.type === 'screenshot').length} screenshots, ${i.evidence.filter((e) => e.type === 'recording' || e.type === 'screencast').length} recordings)` : ''}\n  ${i.assessment ? `Assessment: ${i.assessment.slice(0, 200)}` : 'No assessment'}\n  ${i.goalMet !== undefined ? `Goal met: ${i.goalMet}` : ''}\n  ${i.visualNotes ? `Visual notes: ${i.visualNotes.slice(0, 200)}` : ''}`
+      `[${i.iteration}] ${i.role} via ${i.backend ?? 'unknown'} (${i.workerId})\n  Task: ${i.workerTask.slice(0, 120)}\n  Status: ${i.completedAt ? 'completed' : 'pending'}\n  Evidence: ${i.evidence.length} files${i.evidence.length > 0 ? ` (${i.evidence.filter((e) => e.type === 'screenshot').length} screenshots, ${i.evidence.filter((e) => e.type === 'recording' || e.type === 'screencast').length} recordings)` : ''}\n  ${i.assessment ? `Assessment: ${i.assessment.slice(0, 200)}` : 'No assessment'}\n  ${i.goalMet !== undefined ? `Goal met: ${i.goalMet}` : ''}\n  ${i.visualNotes ? `Visual notes: ${i.visualNotes.slice(0, 200)}` : ''}`
     ).join('\n')
   }
 
@@ -756,13 +885,68 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
     return `🎬 Recording stopped (PID: ${pid}).\n\nAllow a few seconds for ffmpeg to finalize the file.\nCheck evidence with: goal evidence`
   }
 
+  // ─── Herd integration ───
+  if (/^herd\s+/i.test(subcommand)) {
+    const parts = subcommand.trim().split(/\s+/)
+    const action = (parts[1] || 'list').toLowerCase()
+    const target = parts[2]
+    const goals = await listGoals()
+    const active = goals.find((g) => g.status !== 'done' && g.status !== 'paused')
+    if (!active && action !== 'list') return 'No active goal.'
+
+    if (action === 'list' || action === 'status') {
+      const state = await readHerdState()
+      const session = state.session || HERD_SESSION
+      const result = await herdr(['agent', 'list'], { session, timeout: 10000 })
+      return `Herd session: ${session}\nGoal workspace: ${state.workspaceId || 'unknown'}\n\n${result.stdout.trim() || result.stderr.trim() || 'No Herd agents found.'}`
+    }
+
+    if (action === 'read') {
+      if (!target) return 'Usage: goal herd read <agent-name> [lines]'
+      const lines = parts[3] && /^\d+$/.test(parts[3]) ? Number(parts[3]) : 120
+      return await readHerdGoalOutput(target, lines)
+    }
+
+    if (action === 'wait') {
+      if (!target) return 'Usage: goal herd wait <agent-name> [timeout-ms]'
+      const timeout = parts[3] && /^\d+$/.test(parts[3]) ? Number(parts[3]) : 600000
+      const output = await waitHerdGoalOutput(target, timeout)
+      if (active) {
+        const iterations = await readIterations(active.id)
+        const iter = iterations.find((i) => i.workerId === target || i.agentName === target)
+        if (iter) {
+          iter.completedAt = new Date().toISOString()
+          if (iter.handoffPath && existsSync(iter.handoffPath)) {
+            iter.assessment = await readFile(iter.handoffPath, 'utf8')
+          } else {
+            iter.assessment = output.slice(0, 4000)
+          }
+          iter.evidence = await collectEvidence(active.id, iter.iteration)
+          await writeIterations(active.id, iterations)
+        }
+      }
+      return `Herd worker idle: ${target}\n\n${output}`
+    }
+
+    return 'Usage: goal herd list | goal herd read <agent> | goal herd wait <agent>'
+  }
+
   // ─── Iterate ───
-  if (/^iterate$/i.test(subcommand)) {
+  if (/^iterate(?:\b|$)/i.test(subcommand)) {
     const goals = await listGoals()
     const active = goals.find((g) => g.status !== 'done' && g.status !== 'paused')
     if (!active) return 'No active goal. Set one with: goal "<objective>"'
 
+    const modeMatch = subcommand.match(/--mode\s+(current|herd|subagent)/i)
+    const roleMatch = subcommand.match(/--role\s+(scout|researcher|planner|reviewer|worker|research|plan|review|implement)/i)
+    const mode = (modeMatch?.[1]?.toLowerCase() ?? 'current') as 'current' | 'herd' | 'subagent'
+    const roleAlias = roleMatch?.[1]?.toLowerCase()
     const roles = suggestRoles(active.goal)
+    const selectedRole = (roleAlias === 'research' ? 'researcher'
+      : roleAlias === 'plan' ? 'planner'
+      : roleAlias === 'review' ? 'reviewer'
+      : roleAlias === 'implement' ? 'worker'
+      : roleAlias as GoalRole | undefined) ?? roles[0] ?? 'planner'
     const iteration = active.currentIteration + 1
     const previousIterations = await readIterations(active.id)
     const evDir = evidenceDir(active.id, iteration)
@@ -782,6 +966,22 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
       ? `\nPrevious visual evidence:\n${previousEvidence.map((e) => `- ${e.type}: ${e.path}`).join('\n')}`
       : ''
 
+    if (mode === 'herd') {
+      const record = await startHerdGoalRun(active, selectedRole, iteration, ctx.cwd)
+      const iterations = await readIterations(active.id)
+      iterations.push(record)
+      active.currentIteration = iteration
+      active.status = 'executing'
+      active.workerIds.push(record.workerId)
+      await writeIterations(active.id, iterations)
+      await writeGoal(active)
+      return `Started visible Herd ${selectedRole} for goal ${active.id}, iteration ${iteration}.\n\nAgent: ${record.agentName}\nBackend: herd\nHandoff: ${record.handoffPath}\nEvidence dir: ${evDir}\n\nWatch/read:\n  goal herd read ${record.agentName}\nWait and import output:\n  goal herd wait ${record.agentName}\nAttach directly:\n  herdr --session ${HERD_SESSION} agent attach ${record.agentName}\n\nReminder: visual evidence of the final product still must be captured with goal screenshot/record-start and evaluated with goal evaluate-visual.`
+    }
+
+    const modeNotes = mode === 'subagent'
+      ? `Recommended operating mode:\n- Use hidden subagents only for narrow advisory work.\n- Do not use implementation subagents unless explicitly requested.\n- Prefer scout/researcher/planner/reviewer outputs saved to files.\n- Return to current session for implementation ownership and visual evidence capture.`
+      : `Recommended operating mode:\n- Keep ownership in the current Pi session.\n- Use local tools directly first: read, bash, edit/write, web/github/video tools as needed.\n- Use Herd for visible long-running work when you need control/persistence: goal iterate --mode herd --role reviewer.\n- Pull in a hidden scout/researcher/planner/reviewer subagent only when it reduces context load or risk.\n- Do NOT use implementation subagents by default; they can blow the context window and lose ownership.`
+
     const brief = `Iteration ${iteration} coordination brief for goal: "${active.goal}"
 
 Verification: ${active.verification}
@@ -790,17 +990,22 @@ ${active.constraints ? `Constraints: ${active.constraints}` : ''}
 ${previousHandoffs ? `Previous delegated results:\n${previousHandoffs}` : 'First iteration — no prior delegated work recorded.'}
 ${evidenceList}
 
-Recommended operating mode:
-- Keep ownership in the current Pi session.
-- Use local tools directly first: read, bash, edit/write, web/github/video tools as needed.
-- Pull in a scout/researcher/planner/reviewer worker only when it reduces context load or risk.
-- Do NOT use implementation workers by default; they can blow the context window and lose ownership.
-- If delegation is useful, delegate narrow read-only tasks first: map files, research docs, critique plan, review diff.
-- Capture visual evidence of the final product/feature, not the worker terminal.
+${modeNotes}
+- Capture visual evidence of the final product/feature, not the worker/subagent terminal.
 
 ${evidenceInstructions(active.id, iteration)}
 
 Suggested optional helper roles: ${roles.length > 0 ? roles.join(', ') : 'none by default — use current-session tools first'}.
+
+Delegation patterns:
+- Scout: subagent({ agent: "scout", task: "...", context: "fresh", output: "context.md", outputMode: "file-only" })
+- Researcher: subagent({ agent: "researcher", task: "...", context: "fresh", output: "research.md", outputMode: "file-only" })
+- Planner: subagent({ agent: "planner", task: "...", context: "fork", output: "plan.md" })
+- Reviewer: subagent({ agent: "reviewer", task: "...", context: "fresh", output: false })
+- Worker (implement, hidden): subagent({ agent: "worker", task: "...", context: "fork", async: true })
+- Visible Herd worker: goal iterate --mode herd --role worker
+- Visible Herd reviewer: goal iterate --mode herd --role reviewer
+- Clean reviewer: subagent({ agent: "clean-reviewer", task: "...", context: "fresh", output: false })
 
 Current-session checklist:
 1. Decide the smallest next action.
@@ -820,10 +1025,12 @@ Evidence dir: ${evDir}
 
 ${brief}
 
-If you choose to delegate, prefer narrow read-only helpers, for example:
-${roles.length > 0 ? roles.map((role) => `  worker ${role} "Read-only helper for goal ${active.id}: ${active.goal}. Return concise findings only; do not implement."`).join('\n') : '  (no worker suggested for this goal yet)'}
+Execution options:
+- Current session: continue directly from this brief.
+- Visible Herd: goal iterate --mode herd --role ${selectedRole}
+- Hidden subagent: ${roles.length > 0 ? roles.map((role) => `subagent({ agent: "${role}", task: "Goal ${active.id}: ${active.goal}. Return concise findings only; do not implement.", context: "fresh", outputMode: "file-only" })`).join(' OR ') : '(no subagent suggested)'}
 
-Otherwise continue in the current session and use goal evaluate / evaluate-visual when evidence exists.`
+Use goal evaluate / evaluate-visual when evidence exists. Use goal screenshot / goal record-start to capture visual proof.`
   }
 
   // ─── Evaluate ───
@@ -988,8 +1195,8 @@ Option 1 — Ask your current Pi session to review the evidence:
    Verification: ${active.verification}
    Evidence: ${evidencePaths.join(', ')}"
 
-Option 2 — If you explicitly want a separate reviewer, spawn a narrow read-only reviewer:
-  worker reviewer --model ${active.visionModel} "Read-only visual review for goal ${active.id}: ${active.goal}. Review screenshots in ${evidenceDir(active.id)} and return concise GOAL_MET/COMPLETION/VISUAL_NOTES. Do not implement."
+Option 2 — If you explicitly want a separate reviewer, delegate a narrow read-only reviewer:
+  subagent({ agent: "reviewer", task: "Visual review for goal ${active.id}: ${active.goal}. Review screenshots in ${evidenceDir(active.id)} and return GOAL_MET/COMPLETION/VISUAL_NOTES. Do not implement.", context: "fresh", outputMode: "file-only" })
 
 Option 3 — View the evidence yourself:
 ${evidencePaths.slice(0, 10).map((p) => `  open "${p}"`).join('\n')}
@@ -1166,12 +1373,24 @@ Use current-session tools first. Run "goal iterate" for a coordination brief, an
 }
 
 export default function (pi: ExtensionAPI) {
+  async function refreshFooter(ctx: ExtensionContext) {
+    if (!ctx.hasUI) return
+    const goals = await listGoals()
+    const active = goals.find((g) => g.status !== 'done' && g.status !== 'paused')
+    if (active) {
+      ctx.ui.setStatus('goal', `${active.status}: ${active.goal.slice(0, 40)}`)
+    } else {
+      ctx.ui.setStatus('goal', undefined)
+    }
+  }
+
   pi.registerCommand('goal', {
     description: 'Set and manage persistent goals with visual evidence verification',
     handler: async (args, ctx) => {
       try {
         const result = await handleGoalCommand(`goal ${args}`, ctx)
         ctx.ui.notify(result, 'info')
+        await refreshFooter(ctx)
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error')
       }
@@ -1183,6 +1402,7 @@ export default function (pi: ExtensionAPI) {
     try {
       const result = await handleGoalCommand(event.text, ctx)
       ctx.ui.notify(result, 'info')
+      await refreshFooter(ctx)
     } catch (error) {
       ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error')
     }
@@ -1196,8 +1416,8 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: 'Set and manage persistent goals with visual evidence verification',
     promptGuidelines: [
       'Use goal when the user wants to achieve a multi-step objective with verifiable results.',
-      'Goal is a lightweight coordinator/evaluator, not an automatic worker spawner.',
-      'Use current-session tools first. Pull in scout/researcher/planner/reviewer workers only when they reduce context load or risk.',
+      'Goal is a lightweight coordinator/evaluator. It can use current-session work, visible Herd workers, or hidden subagents.',
+      'Use current-session tools first. Use Herd for visible long-running work when control/persistence matters. Pull in hidden scout/researcher/planner/reviewer subagents only when they reduce context load or risk.',
       'Do not use implementation workers by default; only spawn worker role if the user explicitly requests delegated implementation.',
       'Keep goal creation responses concise; do not dump long next-step instructions unless asked.',
       'Every completed goal requires at least one screenshot showing the working result.',
@@ -1214,41 +1434,33 @@ export default function (pi: ExtensionAPI) {
       maxIterations: Type.Optional(Type.Number({ description: 'Maximum iterations (default 10)' })),
       model: Type.Optional(Type.String({ description: 'Coordinator model for text evaluation (default deepseek-v4-flash)' })),
       visionModel: Type.Optional(Type.String({ description: 'Vision model for multimodal evaluation (default claude-sonnet-4)' })),
+      mode: Type.Optional(StringEnum(['current', 'herd', 'subagent'] as const)),
+      role: Type.Optional(StringEnum(['scout', 'researcher', 'planner', 'reviewer', 'worker'] as const)),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      let result: { content: { type: 'text'; text: string }[] }
       if (params.action === 'list') {
-        return { content: [{ type: 'text', text: await (async () => { const goals = await listGoals(); return goals.length === 0 ? 'No goals yet.' : (await Promise.all(goals.map(async (g) => { const evidence = await collectEvidence(g.id); return `${g.status.padEnd(12)} ${g.id}  ${g.currentIteration} iters  📸${evidence.filter((e) => e.type === 'screenshot').length} 🎬${evidence.filter((e) => e.type === 'recording' || e.type === 'screencast').length}  "${g.goal.slice(0, 60)}"`; }))).join('\n'); })() }] }
-      }
-
-      if (params.action === 'set') {
+        result = { content: [{ type: 'text', text: await (async () => { const goals = await listGoals(); return goals.length === 0 ? 'No goals yet.' : (await Promise.all(goals.map(async (g) => { const evidence = await collectEvidence(g.id); return `${g.status.padEnd(12)} ${g.id}  ${g.currentIteration} iters  📸${evidence.filter((e) => e.type === 'screenshot').length} 🎬${evidence.filter((e) => e.type === 'recording' || e.type === 'screencast').length}  "${g.goal.slice(0, 60)}"`; }))).join('\n'); })() }] }
+      } else if (params.action === 'set') {
         if (!params.goal) throw new Error('set requires goal text')
         const goalText = `${params.goal}${params.verification ? ` --verify "${params.verification}"` : ''}${params.constraints ? ` --constraints "${params.constraints}"` : ''}${params.maxIterations ? ` --max-iterations ${params.maxIterations}` : ''}${params.model ? ` --model ${params.model}` : ''}${params.visionModel ? ` --vision-model ${params.visionModel}` : ''}`
-        const result = await handleGoalCommand(`goal ${goalText}`, ctx)
-        return { content: [{ type: 'text', text: result }] }
+        result = { content: [{ type: 'text', text: await handleGoalCommand(`goal ${goalText}`, ctx) }] }
+      } else if (params.action === 'screenshot') {
+        result = { content: [{ type: 'text', text: await handleGoalCommand('goal screenshot', ctx) }] }
+      } else if (params.action === 'evidence') {
+        result = { content: [{ type: 'text', text: await handleGoalCommand('goal evidence', ctx) }] }
+      } else {
+        const suffix = params.action === 'iterate'
+          ? `${params.mode ? ` --mode ${params.mode}` : ''}${params.role ? ` --role ${params.role}` : ''}`
+          : ''
+        const commandText = `goal ${params.action}${suffix}`
+        result = { content: [{ type: 'text', text: await handleGoalCommand(commandText, ctx) }] }
       }
-
-      if (params.action === 'screenshot') {
-        const result = await handleGoalCommand('goal screenshot', ctx)
-        return { content: [{ type: 'text', text: result }] }
-      }
-
-      if (params.action === 'evidence') {
-        const result = await handleGoalCommand('goal evidence', ctx)
-        return { content: [{ type: 'text', text: result }] }
-      }
-
-      // All other actions delegate
-      const commandText = `goal ${params.action}`
-      const result = await handleGoalCommand(commandText, ctx)
-      return { content: [{ type: 'text', text: result }] }
+      await refreshFooter(ctx)
+      return result
     },
   })
 
-  pi.on('session_start', (_event, ctx) => {
-    if (ctx.hasUI) ctx.ui.setStatus('goal', 'goal ready')
-  })
-
-  pi.on('session_shutdown', (_event, ctx) => {
-    if (ctx.hasUI) ctx.ui.setStatus('goal', undefined)
-  })
+  // Footer is clean by default — goal status only appears during active goal operations.
+  // Use 'goal status' to check state, 'goal iterate' to get a coordination brief.
 }
