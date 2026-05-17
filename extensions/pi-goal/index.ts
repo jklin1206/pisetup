@@ -44,7 +44,7 @@ type EvidenceItem = {
 type IterationRecord = {
   iteration: number
   role: GoalRole
-  backend?: 'current' | 'herd' | 'subagent' | 'tmux'
+  backend?: 'auto' | 'herd' | 'subagent' | 'tmux'
   workerId: string
   workerTask: string
   startedAt: string
@@ -701,9 +701,9 @@ Usage:
   goal pause                           Pause active goal
   goal resume                          Resume paused goal
   goal clear                           Remove current goal
-  goal iterate                         Create a coordination brief for the current session
+  goal iterate                         Auto-select an agent role/backend for the next iteration
   goal iterate --mode herd [--role reviewer]  Start a visible Herdr worker for this iteration
-  goal iterate --mode subagent         Create a hidden-subagent routing brief (does not auto-run)
+  goal iterate --mode subagent         Route the iteration to hidden subagent delegation
   goal herd list/read/wait <agent>      Inspect or wait on visible Herd goal workers
   goal evaluate                        Evaluate handoffs AND visual evidence
   goal screenshot                      Capture screenshot now (to evidence dir)
@@ -722,8 +722,8 @@ Evidence and verification:
   reviews the visual evidence — not just text claims or worker handoffs.
   Screenshots go to: ~/.pi/agent/pi-goals/<id>/evidence/
 
-Goal is a coordinator/evaluator. It can use current-session work, visible Herd workers, or hidden subagents.
-Defaults: current session first; Herd for visible long-running work; hidden subagents only for narrow advisory tasks.
+Goal is a coordinator/evaluator. It chooses the needed agent role and routes to visible Herd workers or hidden subagents.
+Defaults: Herd for visible long-running/control-sensitive work; hidden subagents for narrow advisory tasks.
 The multimodal evaluator reviews screenshots + recordings and outputs:
   - COMPLETION: percentage
   - GOAL_MET: yes/no/partial
@@ -937,9 +937,9 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
     const active = goals.find((g) => g.status !== 'done' && g.status !== 'paused')
     if (!active) return 'No active goal. Set one with: goal "<objective>"'
 
-    const modeMatch = subcommand.match(/--mode\s+(current|herd|subagent)/i)
+    const modeMatch = subcommand.match(/--mode\s+(auto|herd|subagent)/i)
     const roleMatch = subcommand.match(/--role\s+(scout|researcher|planner|reviewer|worker|research|plan|review|implement)/i)
-    const mode = (modeMatch?.[1]?.toLowerCase() ?? 'current') as 'current' | 'herd' | 'subagent'
+    const mode = (modeMatch?.[1]?.toLowerCase() ?? 'auto') as 'auto' | 'herd' | 'subagent'
     const roleAlias = roleMatch?.[1]?.toLowerCase()
     const roles = suggestRoles(active.goal)
     const selectedRole = (roleAlias === 'research' ? 'researcher'
@@ -966,7 +966,11 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
       ? `\nPrevious visual evidence:\n${previousEvidence.map((e) => `- ${e.type}: ${e.path}`).join('\n')}`
       : ''
 
-    if (mode === 'herd') {
+    const executionMode = mode === 'auto'
+      ? (selectedRole === 'worker' || /long|visible|watch|control|persistent|implement|build|fix|refactor|migrate/i.test(active.goal) ? 'herd' : 'subagent')
+      : mode
+
+    if (executionMode === 'herd') {
       const record = await startHerdGoalRun(active, selectedRole, iteration, ctx.cwd)
       const iterations = await readIterations(active.id)
       iterations.push(record)
@@ -978,9 +982,7 @@ ${completedIterations.length > 0 ? 'Latest assessments:\n' + completedIterations
       return `Started visible Herd ${selectedRole} for goal ${active.id}, iteration ${iteration}.\n\nAgent: ${record.agentName}\nBackend: herd\nHandoff: ${record.handoffPath}\nEvidence dir: ${evDir}\n\nWatch/read:\n  goal herd read ${record.agentName}\nWait and import output:\n  goal herd wait ${record.agentName}\nAttach directly:\n  herdr --session ${HERD_SESSION} agent attach ${record.agentName}\n\nReminder: visual evidence of the final product still must be captured with goal screenshot/record-start and evaluated with goal evaluate-visual.`
     }
 
-    const modeNotes = mode === 'subagent'
-      ? `Recommended operating mode:\n- Use hidden subagents only for narrow advisory work.\n- Do not use implementation subagents unless explicitly requested.\n- Prefer scout/researcher/planner/reviewer outputs saved to files.\n- Return to current session for implementation ownership and visual evidence capture.`
-      : `Recommended operating mode:\n- Keep ownership in the current Pi session.\n- Use local tools directly first: read, bash, edit/write, web/github/video tools as needed.\n- Use Herd for visible long-running work when you need control/persistence: goal iterate --mode herd --role reviewer.\n- Pull in a hidden scout/researcher/planner/reviewer subagent only when it reduces context load or risk.\n- Do NOT use implementation subagents by default; they can blow the context window and lose ownership.`
+    const modeNotes = `Selected backend: hidden subagent (${selectedRole}).\n- Use hidden subagents for narrow advisory work where live terminal control is unnecessary.\n- Use Herd when the work is long-running, implementation-heavy, blocked-prone, or you want to watch/control it.\n- Do not use implementation subagents unless explicitly requested; prefer visible Herd workers for implementation.`
 
     const brief = `Iteration ${iteration} coordination brief for goal: "${active.goal}"
 
@@ -995,7 +997,7 @@ ${modeNotes}
 
 ${evidenceInstructions(active.id, iteration)}
 
-Suggested optional helper roles: ${roles.length > 0 ? roles.join(', ') : 'none by default — use current-session tools first'}.
+Suggested agent role: ${selectedRole}. Other useful roles: ${roles.length > 0 ? roles.join(', ') : 'none suggested'}.
 
 Delegation patterns:
 - Scout: subagent({ agent: "scout", task: "...", context: "fresh", output: "context.md", outputMode: "file-only" })
@@ -1026,7 +1028,7 @@ Evidence dir: ${evDir}
 ${brief}
 
 Execution options:
-- Current session: continue directly from this brief.
+- Auto: goal iterate
 - Visible Herd: goal iterate --mode herd --role ${selectedRole}
 - Hidden subagent: ${roles.length > 0 ? roles.map((role) => `subagent({ agent: "${role}", task: "Goal ${active.id}: ${active.goal}. Return concise findings only; do not implement.", context: "fresh", outputMode: "file-only" })`).join(' OR ') : '(no subagent suggested)'}
 
@@ -1368,8 +1370,7 @@ Objective: ${cleanGoal}
 Evidence dir: ${evidenceDir(id)}
 Optional helper roles: ${roles.length > 0 ? roles.join(', ') : 'none by default'}
 
-Goal is now tracking this objective. It will not auto-spawn workers.
-Use current-session tools first. Run "goal iterate" for a coordination brief, and delegate only narrow scout/research/planner/reviewer work when useful.`
+Goal is now tracking this objective. Run "goal iterate" to choose the next agent role/backend automatically, or force one with "goal iterate --mode herd --role reviewer" / "goal iterate --mode subagent --role scout".`
 }
 
 export default function (pi: ExtensionAPI) {
@@ -1416,8 +1417,8 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: 'Set and manage persistent goals with visual evidence verification',
     promptGuidelines: [
       'Use goal when the user wants to achieve a multi-step objective with verifiable results.',
-      'Goal is a lightweight coordinator/evaluator. It can use current-session work, visible Herd workers, or hidden subagents.',
-      'Use current-session tools first. Use Herd for visible long-running work when control/persistence matters. Pull in hidden scout/researcher/planner/reviewer subagents only when they reduce context load or risk.',
+      'Goal is a lightweight coordinator/evaluator. It chooses the needed agent role and routes to visible Herd workers or hidden subagents.',
+      'Use Herd for visible long-running work when control/persistence matters. Use hidden scout/researcher/planner/reviewer subagents for narrow advisory tasks.',
       'Do not use implementation workers by default; only spawn worker role if the user explicitly requests delegated implementation.',
       'Keep goal creation responses concise; do not dump long next-step instructions unless asked.',
       'Every completed goal requires at least one screenshot showing the working result.',
@@ -1434,7 +1435,7 @@ export default function (pi: ExtensionAPI) {
       maxIterations: Type.Optional(Type.Number({ description: 'Maximum iterations (default 10)' })),
       model: Type.Optional(Type.String({ description: 'Coordinator model for text evaluation (default deepseek-v4-flash)' })),
       visionModel: Type.Optional(Type.String({ description: 'Vision model for multimodal evaluation (default claude-sonnet-4)' })),
-      mode: Type.Optional(StringEnum(['current', 'herd', 'subagent'] as const)),
+      mode: Type.Optional(StringEnum(['auto', 'herd', 'subagent'] as const)),
       role: Type.Optional(StringEnum(['scout', 'researcher', 'planner', 'reviewer', 'worker'] as const)),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
