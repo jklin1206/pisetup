@@ -2650,9 +2650,21 @@ export default function powerlineFooter(pi: ExtensionAPI) {
           return originalRender(width);
         }
 
-        const bc = (s: string) => `${getFgAnsiCode("sep")}${s}${ansi.reset}`;
+        const level = currentThinkingLevel ?? getThinkingLevelFn?.() ?? "off";
+        const thinkingBorder = (() => {
+          switch (level) {
+            case "minimal": return ansi.getFgAnsi(139, 87, 229);  // violet
+            case "low": return ansi.getFgAnsi(31, 111, 235);      // deep blue
+            case "medium": return ansi.getFgAnsi(88, 166, 255);   // focus blue
+            case "high": return ansi.getFgAnsi(188, 140, 255);    // purple
+            case "xhigh": return ansi.getFgAnsi(255, 123, 114);   // red-soft
+            case "off":
+            default: return getFgAnsiCode("sep");
+          }
+        })();
+        const bc = (s: string) => `${thinkingBorder}${s}${ansi.reset}`;
         const promptGlyph = bashModeActive ? "$" : ">";
-        const prompt = `${ansi.getFgAnsi(200, 200, 200)}${promptGlyph}${ansi.reset}`;
+        const prompt = `${thinkingBorder}${promptGlyph}${ansi.reset}`;
         const promptPrefix = ` ${prompt} `;
         const contPrefix = "   ";
         const contentWidth = Math.max(1, width - 3);
