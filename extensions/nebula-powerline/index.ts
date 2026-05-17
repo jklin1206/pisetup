@@ -1241,7 +1241,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         if (settings.quietStartup === true) {
           setupWelcomeHeader(ctx);
         } else {
-          setupWelcomeOverlay(ctx);
+          setupWelcomeOverlay(ctx, true);
         }
       } else {
         dismissWelcome(ctx);
@@ -1758,6 +1758,14 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       }
 
       const normalizedArgs = args.trim().toLowerCase();
+      if (/^(welcome|overlay|start)$/.test(normalizedArgs)) {
+        if (!enabled) {
+          enabled = true;
+          setupCustomEditor(ctx);
+        }
+        setupWelcomeOverlay(ctx, true);
+        return;
+      }
       const mouseScrollMatch = /^mouse-scroll(?:\s+(on|off|toggle))?$/.exec(normalizedArgs);
       if (mouseScrollMatch) {
         const mode = mouseScrollMatch[1] ?? "toggle";
@@ -2738,7 +2746,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     });
   }
 
-  function setupWelcomeOverlay(ctx: any) {
+  function setupWelcomeOverlay(ctx: any, force = false) {
     const modelName = ctx.model?.name || ctx.model?.id || "No model";
     const providerName = ctx.model?.provider || "Unknown";
     const loadedCounts = discoverLoadedCounts();
@@ -2759,7 +2767,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         if (entry.type === "tool_call" || entry.type === "tool_result") return true;
         return entry.type === "message" && isRecord(entry.message) && entry.message.role === "assistant";
       });
-      if (hasActivity) {
+      if (hasActivity && !force) {
         return;
       }
       
