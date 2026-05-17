@@ -129,15 +129,28 @@ function parseJson<T = any>(text: string): T | null {
   try { return JSON.parse(text) as T; } catch { return null; }
 }
 
-async function openHerdr(session: string) {
-  if (process.platform !== "darwin") return "Open manually: herdr --session " + session;
-  const script = `tell application "Terminal"\n  activate\n  do script "herdr --session ${session.replace(/[^a-zA-Z0-9._-]/g, "")} "\nend tell`;
+async function openHerdr(session: string, cwd: string) {
+  const safeSession = session.replace(/[^a-zA-Z0-9._-]/g, "") || DEFAULT_SESSION;
+  const cmuxPath = await execFile("bash", ["-lc", "command -v cmux"], { timeout: 5_000 });
+  if (cmuxPath.code === 0 && cmuxPath.stdout.trim()) {
+    const result = await execFile("cmux", [
+      "new-workspace",
+      "--name", `Herd ${safeSession}`,
+      "--cwd", cwd,
+      "--command", `herdr --session ${safeSession}`,
+      "--focus", "true",
+    ], { timeout: 15_000 });
+    if (result.code === 0) return `Opened cmux workspace: Herd ${safeSession}`;
+  }
+
+  if (process.platform !== "darwin") return "Open manually: herdr --session " + safeSession;
+  const script = `tell application "Terminal"\n  activate\n  do script "herdr --session ${safeSession} "\nend tell`;
   const result = await execFile("osascript", ["-e", script], { timeout: 10_000 });
-  if (result.code !== 0) return `Open manually: herdr --session ${session}`;
-  return `Opened Terminal with: herdr --session ${session}`;
+  if (result.code !== 0) return `Open manually: herdr --session ${safeSession}`;
+  return `Opened Terminal with: herdr --session ${safeSession}`;
 }
 
-async function ensureHerdrReady(session: string, open: boolean) {
+async function ensureHerdrReady(session: string, open: boolean, cwd = process.cwd()) {
   if (!(await herdrInstalled())) {
     throw new Error("Herdr is not installed. Run `/herd install` if you want the official installer, or install from https://github.com/ogulcancelik/herdr.");
   }
@@ -146,7 +159,7 @@ async function ensureHerdrReady(session: string, open: boolean) {
   await execFile("herdr", ["integration", "install", "pi"], { timeout: 20_000 });
 
   let opened = "";
-  if (open) opened = await openHerdr(session);
+  if (open) opened = await openHerdr(session, cwd);
   return opened;
 }
 
@@ -158,7 +171,7 @@ async function boot(args: string, cwd: string) {
   const session = sessionFlag >= 0 ? tokens[sessionFlag + 1] || DEFAULT_SESSION : DEFAULT_SESSION;
   const label = labelFlag >= 0 ? tokens[labelFlag + 1] || path.basename(cwd) : path.basename(cwd) || "work";
 
-  const opened = await ensureHerdrReady(session, !noOpen);
+  const opened = await ensureHerdrReady(session, !noOpen, cwd);
   await new Promise((resolve) => setTimeout(resolve, noOpen ? 0 : 1_000));
 
   const state = await loadState();
@@ -183,7 +196,7 @@ async function boot(args: string, cwd: string) {
 async function start(role: Role, task: string, cwd: string, extraArgs: string) {
   if (!task.trim()) throw new Error(`Usage: /herd ${role} "task"`);
   const state = await loadState();
-  await ensureHerdrReady(state.session, false);
+  await ensureHerdrReady(state.session, false, cwd);
 
   if (!state.workspaceId) {
     const booted = await boot("--no-open", cwd);
