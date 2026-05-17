@@ -34,13 +34,12 @@ const PI_LOGO = [
   "   ╚═══════════╝  ╚═══════════╝  ",
 ];
 
-const GRADIENT_COLORS = [
-  "\x1b[38;2;137;87;229m", // nebula violet
-  "\x1b[38;2;45;109;181m", // deep blue
-  "\x1b[38;2;88;166;255m", // focus blue
-  "\x1b[38;2;121;192;255m", // blue soft
-  "\x1b[38;2;118;227;234m", // cyan glow
-  "\x1b[38;2;126;200;240m", // cool highlight
+const GRADIENT_STOPS: Array<[number, number, number]> = [
+  [137, 87, 229],  // nebula violet
+  [45, 109, 181],  // deep blue
+  [88, 166, 255],  // focus blue
+  [121, 192, 255], // soft blue
+  [118, 227, 234], // cyan glow
 ];
 
 function bold(text: string): string {
@@ -51,20 +50,38 @@ function dim(text: string): string {
   return getFgAnsiCode("sep") + text + ansi.reset;
 }
 
+function mixColor(a: [number, number, number], b: [number, number, number], t: number): [number, number, number] {
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t),
+  ];
+}
+
+function gradientColor(position: number): string {
+  const clamped = Math.max(0, Math.min(1, position));
+  const scaled = clamped * (GRADIENT_STOPS.length - 1);
+  const index = Math.min(GRADIENT_STOPS.length - 2, Math.floor(scaled));
+  const localT = scaled - index;
+  const [r, g, b] = mixColor(GRADIENT_STOPS[index]!, GRADIENT_STOPS[index + 1]!, localT);
+  return `\x1b[38;2;${r};${g};${b}m`;
+}
+
 function gradientLine(line: string): string {
   const reset = ansi.reset;
+  const chars = [...line];
+  const visibleChars = chars.filter((char) => char !== " ").length;
+  let seen = 0;
   let result = "";
-  let colorIdx = 0;
-  const step = Math.max(1, Math.floor(line.length / GRADIENT_COLORS.length));
 
-  for (let i = 0; i < line.length; i++) {
-    if (i > 0 && i % step === 0 && colorIdx < GRADIENT_COLORS.length - 1) colorIdx++;
-    const char = line[i];
-    if (char !== " ") {
-      result += GRADIENT_COLORS[colorIdx] + char + reset;
-    } else {
+  for (const char of chars) {
+    if (char === " ") {
       result += char;
+      continue;
     }
+    const position = visibleChars <= 1 ? 0 : seen / (visibleChars - 1);
+    result += gradientColor(position) + char + reset;
+    seen++;
   }
   return result;
 }
