@@ -2821,12 +2821,18 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         {
           overlay: true,
           overlayOptions: () => ({
-            verticalAlign: "center",
-            horizontalAlign: "center",
+            anchor: "center",
+            width: "92%",
+            minWidth: 112,
+            maxHeight: "90%",
+            margin: 2,
+            visible: (termWidth: number, termHeight: number) => termWidth >= 100 && termHeight >= 24,
           }),
         },
       ).catch((error) => {
-        console.debug("[powerline-footer] Welcome overlay failed:", error);
+        const message = error instanceof Error ? error.message : String(error);
+        console.debug("[nebula-powerline] Welcome overlay failed:", error);
+        if (ctx.hasUI) ctx.ui.notify(`Nebula welcome overlay failed: ${message}`, "error");
       });
     }, 100);
   }
