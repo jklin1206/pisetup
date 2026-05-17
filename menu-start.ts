@@ -297,12 +297,20 @@ function renderHeader(width: number, _startedAt: number, config: MenuStartConfig
     ? (elapsed / config.animationMs) * 1.4
     : 0;
 
-  const cardWidth = Math.min(Math.max(72, width - 10), 108);
+  const cardWidth = Math.min(Math.max(64, width - 28), 92);
   const innerWidth = cardWidth - 4;
-  const leftWidth = Math.min(38, Math.max(28, Math.floor(innerWidth * 0.42)));
+  const leftWidth = Math.min(34, Math.max(26, Math.floor(innerWidth * 0.4)));
   const rightWidth = innerWidth - leftWidth - 3;
 
-  const logo = normalizeLogo(config.logo).map((line, index) => bold(renderLogoLine(line, index, config.logo.length, { accentCool, accent, accentHot }, shimmer)));
+  const sourceLogo = width < 100 ? [
+    "█████████████╗",
+    "╚═══███╔═══╝",
+    "    ███║    ",
+    "    ███║    ",
+    "███████████╗",
+    "╚══════════╝",
+  ] : config.logo;
+  const logo = normalizeLogo(sourceLogo).map((line, index) => bold(renderLogoLine(line, index, sourceLogo.length, { accentCool, accent, accentHot }, shimmer)));
   const leftPane = [
     "",
     center(fg(ink, "Welcome back!"), leftWidth),
@@ -331,7 +339,7 @@ function renderHeader(width: number, _startedAt: number, config: MenuStartConfig
     sectionLine("thinking", formatThinking().replace(/^think /, ""), { accent, muted, ink }),
     sectionLine("context", usageLabel, { accent, muted, ink }),
     sectionLine("messages", formatMessages(ctx), { accent, muted, ink }),
-    ...(items.length > 0 ? [fg(border, "─".repeat(Math.min(54, rightWidth))), fg(accentHot, "Telemetry"), items.map((item, index) => renderPill(item, index, { muted, accent, accentCool, accentHot })).join(fg(dimColor, "  ·  "))] : []),
+    ...(items.length > 0 ? [fg(border, "─".repeat(Math.min(48, rightWidth))), fg(accentHot, "Telemetry"), items.slice(0, 3).map((item, index) => renderPill(item, index, { muted, accent, accentCool, accentHot })).join(fg(dimColor, "  ·  "))] : []),
   ];
 
   const rows = Math.max(leftPane.length, rightPane.length);
@@ -342,7 +350,7 @@ function renderHeader(width: number, _startedAt: number, config: MenuStartConfig
     frameBottom("Press any key to continue", cardWidth, { border, muted }),
   ];
 
-  return ["", ...framed.map((line) => center(line, width)), ""];
+  return ["", "", "", ...framed.map((line) => center(line, width)), ""];
 }
 
 export default function (pi: ExtensionAPI) {
