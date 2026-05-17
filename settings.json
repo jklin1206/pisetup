@@ -5,7 +5,6 @@
   "defaultThinkingLevel": "high",
   "theme": "nebula-focus",
   "packages": [
-    "npm:pi-subagents",
     "npm:pi-mcp-adapter"
   ]
 }
