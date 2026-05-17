@@ -1,7 +1,7 @@
 {
-  "lastChangelogVersion": "0.74.1",
+  "lastChangelogVersion": "0.75.0",
   "defaultProvider": "opencode-go",
-  "defaultModel": "kimi-k2.6",
+  "defaultModel": "deepseek-v4-pro",
   "defaultThinkingLevel": "high",
   "theme": "nebula-focus",
   "packages": [
@@ -19,23 +19,6 @@
     "preset": "default",
     "fixedEditor": true,
     "mouseScroll": true,
-    "customItems": [
-      {
-        "id": "goal",
-        "statusKey": "goal",
-        "position": "right",
-        "prefix": "goal",
-        "color": "accent",
-        "hideWhenMissing": false
-      },
-      {
-        "id": "workers",
-        "statusKey": "workers",
-        "position": "right",
-        "prefix": "workers",
-        "color": "success",
-        "hideWhenMissing": false
-      }
-    ]
+    "customItems": []
   }
 }

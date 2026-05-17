@@ -23,9 +23,9 @@ const NERD_COLORS: ColorScheme = {
 
 export const PRESETS: Record<StatusLinePreset, PresetDef> = {
   default: {
-    leftSegments: ["pi", "model", "thinking", "shell_mode", "path", "git", "context_pct", "cache_read", "cost"],
+    leftSegments: ["pi", "model", "thinking", "shell_mode", "path", "git", "context_pct"],
     rightSegments: [],
-    secondarySegments: ["extension_statuses"],
+    secondarySegments: [],
     separator: "powerline-thin",
     colors: DEFAULT_COLORS,
     segmentOptions: {
@@ -47,8 +47,8 @@ export const PRESETS: Record<StatusLinePreset, PresetDef> = {
   },
 
   compact: {
-    leftSegments: ["pi", "model", "shell_mode", "git"],
-    rightSegments: ["cost", "context_pct"],
+    leftSegments: ["pi", "model", "thinking", "shell_mode", "path", "git"],
+    rightSegments: ["context_pct"],
     separator: "powerline-thin",
     colors: DEFAULT_COLORS,
     segmentOptions: {
