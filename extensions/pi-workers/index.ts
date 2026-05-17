@@ -284,7 +284,7 @@ async function spawnWorker(role: Role, task: string, cwd: string, ctx: Extension
   await writeFile(handoffPath, `# Pi Worker Handoff — ${role}\n\nStatus: pending\n\nWorker: ${id}\nTask: ${task}\n`, 'utf8')
   await writeFile(
     runnerPath,
-    `#!/bin/zsh\ncd ${JSON.stringify(cwd)} || exit 1\nSYSTEM_PROMPT=$(cat ${JSON.stringify(systemPath)})\necho "[pi-worker] ${id} role=${role} cwd=$(pwd)"\necho "[pi-worker] prompt: ${promptPath}"\necho "[pi-worker] model: ${modelSelection.resolvedModel ?? 'default/current Pi router'} (${modelSelection.modelSource})"\necho "[pi-worker] handoff: ${handoffPath}"\necho "[pi-worker] transcript: ${transcriptPath}"\nexec pi ${modelSelection.resolvedModel ? `--model ${JSON.stringify(modelSelection.resolvedModel)} ` : ''}--append-system-prompt "$SYSTEM_PROMPT" ${JSON.stringify(`@${promptPath}`)}\n`,
+    `#!/bin/zsh\ncd ${JSON.stringify(cwd)} || exit 1\nSYSTEM_PROMPT=$(cat ${JSON.stringify(systemPath)})\necho "[pi-worker] ${id} role=${role} cwd=$(pwd)"\necho "[pi-worker] prompt: ${promptPath}"\necho "[pi-worker] model: ${modelSelection.resolvedModel ?? 'default/current Pi router'} (${modelSelection.modelSource})"\necho "[pi-worker] handoff: ${handoffPath}"\necho "[pi-worker] transcript: ${transcriptPath}"\npi ${modelSelection.resolvedModel ? `--model ${JSON.stringify(modelSelection.resolvedModel)} ` : ''}--append-system-prompt "$SYSTEM_PROMPT" ${JSON.stringify(`@${promptPath}`)}\nEXIT_CODE=$?\necho "[pi-worker] ${id} finished with exit code $EXIT_CODE"\ndate -u +'%Y-%m-%dT%H:%M:%SZ' > ${JSON.stringify(path.join(runDir, 'completed'))}\necho $EXIT_CODE > ${JSON.stringify(path.join(runDir, 'exit-code'))}\nif [ -f ${JSON.stringify(handoffPath)} ]; then\n  STATUS_FILE=$(cat ${JSON.stringify(handoffPath)} | head -5)\n  osascript -e 'display notification "Pi worker finished: ${role} (${id})" with title "Pi Worker"' 2>/dev/null || true\nelse\n  osascript -e 'display notification "Pi worker finished: ${role} (${id}) — no handoff" with title "Pi Worker"' 2>/dev/null || true\nfi\nexit $EXIT_CODE\n`,
     { encoding: 'utf8', mode: 0o700 }
   )
 
@@ -313,13 +313,19 @@ async function spawnWorker(role: Role, task: string, cwd: string, ctx: Extension
   return record
 }
 
+async function isCompleted(runDir: string): Promise<boolean> {
+  return existsSync(path.join(runDir, 'completed'))
+}
+
 async function statusLines(): Promise<string> {
   const items = await records()
   if (items.length === 0) return 'No Pi workers yet.'
   const lines = await Promise.all(items.map(async (r) => {
     const alive = await hasTmuxSession(r.tmuxSession)
+    const completed = await isCompleted(r.runDir)
     const handoffExists = existsSync(r.handoffPath)
-    return `${alive ? 'running' : 'stopped'}  ${r.id}  ${r.role}  ${r.tmuxSession}${handoffExists ? '  handoff:yes' : '  handoff:no'}  model:${r.resolvedModel ?? 'default'} (${r.modelSource})\n  cwd: ${r.cwd}\n  task: ${r.task.slice(0, 120)}\n  attach: tmux attach -t ${r.tmuxSession}\n  handoff: ${r.handoffPath}\n  transcript: ${path.join(r.runDir, 'transcript.ansi')}`
+    const status = alive ? 'running' : (completed ? 'done' : 'stopped')
+    return `${status}  ${r.id}  ${r.role}  ${r.tmuxSession}${handoffExists ? '  handoff:yes' : '  handoff:no'}  model:${r.resolvedModel ?? 'default'} (${r.modelSource})\n  cwd: ${r.cwd}\n  task: ${r.task.slice(0, 120)}\n  attach: tmux attach -t ${r.tmuxSession}\n  handoff: ${r.handoffPath}\n  transcript: ${path.join(r.runDir, 'transcript.ansi')}`
   }))
   return lines.join('\n\n')
 }
@@ -360,7 +366,7 @@ async function handleTextCommand(text: string, ctx: ExtensionContext): Promise<s
   const trimmed = text.trim()
   const [, rest = ''] = trimmed.match(/^pi\s+worker(?:s)?\s*(.*)$/i) ?? []
   if (!rest || /^help$/i.test(rest)) {
-    return `Pi Workers commands:\n- pi worker spawn <scout|researcher|planner|reviewer|worker> <task>\n- pi worker scout --model opencode-go/kimi-k2.6 <task>\n- pi worker scout --model current <task>\n- pi worker scout <task>\n- pi worker research <task>\n- pi worker plan <task>\n- pi worker review <task>\n- pi worker implement <task>\n- pi worker list\n- pi worker attach <id>\n- pi worker kill <id>\n- pi worker handoff <id>\n- pi worker transcript <id>\n\nGlobal routing map: ${GLOBAL_WORKERS_MAP}\nModel config: ${CONFIG_PATH}`
+    return `Pi Workers commands:\n- pi worker spawn <scout|researcher|planner|reviewer|worker> <task>\n- pi worker scout --model opencode-go/kimi-k2.6 <task>\n- pi worker scout --model current <task>\n- pi worker scout <task>\n- pi worker research <task>\n- pi worker plan <task>\n- pi worker review <task>\n- pi worker implement <task>\n- pi worker list\n- pi worker attach <id>\n- pi worker kill <id>\n- pi worker handoff <id>\n- pi worker wait <id>    (blocks until worker finishes, then returns handoff)\n- pi worker transcript <id>\n\nGlobal routing map: ${GLOBAL_WORKERS_MAP}\nModel config: ${CONFIG_PATH}\nWorkers send macOS notification on completion.`
   }
 
   if (/^list$/i.test(rest)) return statusLines()
@@ -384,6 +390,22 @@ async function handleTextCommand(text: string, ctx: ExtensionContext): Promise<s
     if (!record) return `No worker found for ${kill[1].trim()}`
     const result = await execFile('tmux', ['kill-session', '-t', record.tmuxSession])
     return result.code === 0 ? `Killed ${record.tmuxSession}` : `Kill failed: ${result.stderr}`
+  }
+
+  const wait = rest.match(/^wait\s+(.+)$/i)
+  if (wait) {
+    const record = await findRecord(wait[1].trim())
+    if (!record) return `No worker found for ${wait[1].trim()}`
+    const completedPath = path.join(record.runDir, 'completed')
+    while (!existsSync(completedPath)) {
+      const alive = await hasTmuxSession(record.tmuxSession)
+      if (!alive && !existsSync(completedPath)) {
+        await new Promise((r) => setTimeout(r, 500))
+        if (!existsSync(completedPath)) return `Worker ${record.id} stopped without completing. Attach: tmux attach -t ${record.tmuxSession}\nHandoff: ${record.handoffPath}`
+      }
+      await new Promise((r) => setTimeout(r, 1000))
+    }
+    return handoffSummary(record)
   }
 
   const handoff = rest.match(/^handoff\s+(.+)$/i)
