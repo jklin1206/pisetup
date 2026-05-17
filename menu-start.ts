@@ -253,6 +253,35 @@ function renderLogoLine(line: string, row: number, rowCount: number, colors: { a
     .join("");
 }
 
+function padVisible(text: string, width: number) {
+  const safe = truncateVisible(text, width);
+  return `${safe}${" ".repeat(Math.max(0, width - visibleLength(safe)))}`;
+}
+
+function frameTitle(title: string, width: number, colors: { border: Rgb; accentHot: Rgb; muted: Rgb }) {
+  const inner = Math.max(4, width - 2);
+  const plainTitle = ` ${title} `;
+  const left = Math.max(1, Math.floor((inner - visibleLength(plainTitle)) / 2));
+  const right = Math.max(1, inner - visibleLength(plainTitle) - left);
+  return `${fg(colors.border, "╭" + "─".repeat(left))}${fg(colors.accentHot, plainTitle)}${fg(colors.border, "─".repeat(right) + "╮")}`;
+}
+
+function frameBottom(label: string, width: number, colors: { border: Rgb; muted: Rgb }) {
+  const inner = Math.max(4, width - 2);
+  const plainLabel = label ? ` ${label} ` : "";
+  const left = Math.max(1, Math.floor((inner - visibleLength(plainLabel)) / 2));
+  const right = Math.max(1, inner - visibleLength(plainLabel) - left);
+  return `${fg(colors.border, "╰" + "─".repeat(left))}${fg(colors.muted, plainLabel)}${fg(colors.border, "─".repeat(right) + "╯")}`;
+}
+
+function frameRow(left: string, right: string, leftWidth: number, rightWidth: number, colors: { border: Rgb }) {
+  return `${fg(colors.border, "│")} ${padVisible(left, leftWidth)} ${fg(colors.border, "│")} ${padVisible(right, rightWidth)} ${fg(colors.border, "│")}`;
+}
+
+function sectionLine(label: string, value: string, colors: { accent: Rgb; muted: Rgb; ink: Rgb }) {
+  return `${fg(colors.accent, label.padEnd(9, " "))}${fg(colors.muted, value)}`;
+}
+
 function renderHeader(width: number, _startedAt: number, config: MenuStartConfig, ctx: ExtensionContext) {
   const ink = hexToRgb(config.colors.ink, [232, 247, 255]);
   const muted = hexToRgb(config.colors.muted, [143, 178, 199]);
@@ -261,29 +290,59 @@ function renderHeader(width: number, _startedAt: number, config: MenuStartConfig
   const accentHot = hexToRgb(config.colors.accentHot, [126, 200, 240]);
   const accentCool = hexToRgb(config.colors.accentCool, [45, 109, 181]);
   const loadingColor = hexToRgb(config.colors.loading, accent);
-  const loading = config.loadingText;
-  const hairlineLength = Math.min(config.hairlineWidth, Math.max(12, width - 12));
-  const hairline = [..."─".repeat(hairlineLength)]
-    .map((char, index) => fg(mix(accentCool, accentHot, hairlineLength <= 1 ? 0 : index / (hairlineLength - 1)), char))
-    .join("");
+  const border = mix(accentCool, dimColor, 0.55);
   const items = config.status.enabled ? statusItems(ctx, config) : [];
-  const statusLine = items.map((item, index) => renderPill(item, index, { muted, accent, accentCool, accentHot })).join(fg(dimColor, "  ·  "));
-
-  const logo = normalizeLogo(config.logo);
   const elapsed = Date.now() - _startedAt;
   const shimmer = config.animationMs > 0 && elapsed < config.animationMs
     ? (elapsed / config.animationMs) * 1.4
     : 0;
 
-  return [
+  const cardWidth = Math.min(Math.max(72, width - 10), 108);
+  const innerWidth = cardWidth - 4;
+  const leftWidth = Math.min(38, Math.max(28, Math.floor(innerWidth * 0.42)));
+  const rightWidth = innerWidth - leftWidth - 3;
+
+  const logo = normalizeLogo(config.logo).map((line, index) => bold(renderLogoLine(line, index, config.logo.length, { accentCool, accent, accentHot }, shimmer)));
+  const leftPane = [
     "",
-    ...logo.map((line, index) => center(bold(renderLogoLine(line, index, logo.length, { accentCool, accent, accentHot }, shimmer)), width)),
-    ...(config.showHairline ? [center(hairline, width)] : []),
-    ...(config.subtext ? [center(fg(ink, config.subtext), width)] : []),
-    ...(loading ? [center(fg(loadingColor, loading), width)] : []),
-    ...(statusLine ? [center(statusLine, width)] : []),
+    center(fg(ink, "Welcome back!"), leftWidth),
     "",
+    ...logo.map((line) => center(line, leftWidth)),
+    "",
+    center(fg(accentHot, config.loadingText || "systems online"), leftWidth),
+    center(fg(muted, config.subtext || "nebula cockpit"), leftWidth),
   ];
+
+  const branch = gitBranch(ctx.cwd);
+  const usage = ctx.getContextUsage();
+  const usageLabel = usage?.contextWindow ? `${Math.round((usage.tokens / usage.contextWindow) * 100)}% / ${Math.round(usage.contextWindow / 1000)}k` : "pending";
+  const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "pending";
+  const rightPane = [
+    "",
+    fg(accentHot, "Tips"),
+    `${fg(accent, "/")} ${fg(muted, "commands")}`,
+    `${fg(accent, "!")} ${fg(muted, "run bash")}`,
+    `${fg(accent, "⇧⇥")} ${fg(muted, "cycle thinking")}`,
+    fg(border, "─".repeat(Math.min(54, rightWidth))),
+    fg(accentHot, "Loaded"),
+    sectionLine("cwd", basename(ctx.cwd) || ctx.cwd, { accent, muted, ink }),
+    sectionLine("git", branch || "none", { accent, muted, ink }),
+    sectionLine("model", model, { accent, muted, ink }),
+    sectionLine("thinking", formatThinking().replace(/^think /, ""), { accent, muted, ink }),
+    sectionLine("context", usageLabel, { accent, muted, ink }),
+    sectionLine("messages", formatMessages(ctx), { accent, muted, ink }),
+    ...(items.length > 0 ? [fg(border, "─".repeat(Math.min(54, rightWidth))), fg(accentHot, "Telemetry"), items.map((item, index) => renderPill(item, index, { muted, accent, accentCool, accentHot })).join(fg(dimColor, "  ·  "))] : []),
+  ];
+
+  const rows = Math.max(leftPane.length, rightPane.length);
+  const body = Array.from({ length: rows }, (_, index) => frameRow(leftPane[index] || "", rightPane[index] || "", leftWidth, rightWidth, { border }));
+  const framed = [
+    frameTitle("pi agent", cardWidth, { border, accentHot, muted }),
+    ...body,
+    frameBottom("Press any key to continue", cardWidth, { border, muted }),
+  ];
+
+  return ["", ...framed.map((line) => center(line, width)), ""];
 }
 
 export default function (pi: ExtensionAPI) {
