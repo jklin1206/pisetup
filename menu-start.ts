@@ -25,6 +25,7 @@ interface MenuStartConfig {
     showCwd: boolean;
     showGit: boolean;
     showModel: boolean;
+    showThinking: boolean;
     showContext: boolean;
     showMessages: boolean;
   };
@@ -66,6 +67,7 @@ const DEFAULT_CONFIG: MenuStartConfig = {
     showCwd: true,
     showGit: true,
     showModel: true,
+    showThinking: true,
     showContext: true,
     showMessages: true,
   },
@@ -179,7 +181,17 @@ function gitBranch(cwd: string) {
 function formatModel(ctx: ExtensionContext) {
   const model = ctx.model;
   if (!model) return "model pending";
-  return `${model.provider}/${model.id}`;
+  return `model ${model.provider}/${model.id}`;
+}
+
+function formatThinking() {
+  try {
+    const settingsPath = join(getAgentDir(), "settings.json");
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { defaultThinkingLevel?: string };
+    return `think ${settings.defaultThinkingLevel || "default"}`;
+  } catch {
+    return "think default";
+  }
 }
 
 function formatContext(ctx: ExtensionContext) {
@@ -201,14 +213,16 @@ function statusItems(ctx: ExtensionContext, config: MenuStartConfig) {
     items.push(branch ? `git ${branch}` : "git none");
   }
   if (config.status.showModel) items.push(formatModel(ctx));
+  if (config.status.showThinking) items.push(formatThinking());
   if (config.status.showContext) items.push(formatContext(ctx));
   if (config.status.showMessages) items.push(formatMessages(ctx));
   return items;
 }
 
-function renderPill(label: string, index: number, colors: { muted: Rgb; accent: Rgb; accentCool: Rgb }) {
-  const dotColor = index % 2 === 0 ? colors.accent : colors.accentCool;
-  return `${fg(dotColor, "●")} ${fg(colors.muted, label)}`;
+function renderPill(label: string, index: number, colors: { muted: Rgb; accent: Rgb; accentCool: Rgb; accentHot: Rgb }) {
+  const palette = [colors.accentHot, colors.accent, colors.accentCool];
+  const dotColor = palette[index % palette.length] ?? colors.accent;
+  return `${fg(dotColor, "◆")} ${fg(colors.muted, label)}`;
 }
 
 function normalizeLogo(logo: string[]) {
@@ -216,7 +230,7 @@ function normalizeLogo(logo: string[]) {
   return logo.map((line) => line.padEnd(width, " "));
 }
 
-function renderLogoLine(line: string, row: number, rowCount: number, colors: { accentCool: Rgb; accent: Rgb; accentHot: Rgb }) {
+function renderLogoLine(line: string, row: number, rowCount: number, colors: { accentCool: Rgb; accent: Rgb; accentHot: Rgb }, shimmer = 0) {
   const chars = [...line];
   const lastCol = Math.max(1, chars.length - 1);
   const lastRow = Math.max(1, rowCount - 1);
@@ -228,7 +242,8 @@ function renderLogoLine(line: string, row: number, rowCount: number, colors: { a
       const horizontal = col / lastCol;
       const vertical = row / lastRow;
       const diagonal = Math.min(1, horizontal * 0.58 + vertical * 0.42);
-      const sweep = (Math.sin((horizontal * 0.9 + vertical * 0.55) * Math.PI) + 1) / 2;
+      const sweepPosition = horizontal * 0.9 + vertical * 0.55;
+      const sweep = (Math.sin((sweepPosition + shimmer) * Math.PI) + 1) / 2;
       const base = diagonal < 0.52
         ? mix(colors.accentCool, colors.accent, diagonal / 0.52)
         : mix(colors.accent, colors.accentHot, (diagonal - 0.52) / 0.48);
@@ -252,13 +267,17 @@ function renderHeader(width: number, _startedAt: number, config: MenuStartConfig
     .map((char, index) => fg(mix(accentCool, accentHot, hairlineLength <= 1 ? 0 : index / (hairlineLength - 1)), char))
     .join("");
   const items = config.status.enabled ? statusItems(ctx, config) : [];
-  const statusLine = items.map((item, index) => renderPill(item, index, { muted, accent, accentCool })).join(fg(dimColor, "  •  "));
+  const statusLine = items.map((item, index) => renderPill(item, index, { muted, accent, accentCool, accentHot })).join(fg(dimColor, "  ·  "));
 
   const logo = normalizeLogo(config.logo);
+  const elapsed = Date.now() - _startedAt;
+  const shimmer = config.animationMs > 0 && elapsed < config.animationMs
+    ? (elapsed / config.animationMs) * 1.4
+    : 0;
 
   return [
     "",
-    ...logo.map((line, index) => center(bold(renderLogoLine(line, index, logo.length, { accentCool, accent, accentHot })), width)),
+    ...logo.map((line, index) => center(bold(renderLogoLine(line, index, logo.length, { accentCool, accent, accentHot }, shimmer)), width)),
     ...(config.showHairline ? [center(hairline, width)] : []),
     ...(config.subtext ? [center(fg(ink, config.subtext), width)] : []),
     ...(loading ? [center(fg(loadingColor, loading), width)] : []),
@@ -295,7 +314,7 @@ export default function (pi: ExtensionAPI) {
         if (!config.status.enabled || slowMode) return;
         slowMode = true;
         animationTimer = setInterval(() => tui.requestRender(), Math.max(500, config.status.refreshMs));
-      }, Math.max(80, config.frameMs));
+      }, Date.now() - startedAt <= config.animationMs ? 90 : Math.max(80, config.frameMs));
 
       return {
         render(width: number) {

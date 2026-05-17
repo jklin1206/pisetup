@@ -1,0 +1,63 @@
+# Nebula Focus cockpit for Pi
+# Inspired by dmmulroy's Ghostty baseline, adapted to your Pi ASCII + Nebula palette.
+
+# Shell integrations
+shell-integration = fish
+quit-after-last-window-closed = true
+
+# Font
+font-family = MonoLisa
+font-style = Regular
+font-style-italic = Regular Italic
+font-style-bold = Bold
+font-style-bold-italic = Bold Italic
+font-size = 18
+
+# Window
+window-width = 96
+window-height = 34
+window-colorspace = display-p3
+window-padding-color = background
+window-padding-balance = true
+window-padding-x = 0
+window-padding-y = 0
+background-opacity = 1.0
+unfocused-split-opacity = 0.96
+
+# Cursor / clipboard
+cursor-style-blink = true
+clipboard-read = allow
+clipboard-write = allow
+
+# macOS
+macos-option-as-alt = true
+macos-titlebar-proxy-icon = hidden
+title = pi · nebula
+
+# Nebula Focus palette
+background = #0d1117
+foreground = #e6edf3
+cursor-color = #76e3ea
+selection-background = #1f2f4a
+selection-foreground = #e6edf3
+
+# ANSI palette
+palette = 0=#010409
+palette = 1=#f85149
+palette = 2=#3fb950
+palette = 3=#d29922
+palette = 4=#58a6ff
+palette = 5=#bc8cff
+palette = 6=#76e3ea
+palette = 7=#e6edf3
+palette = 8=#6e7681
+palette = 9=#ff7b72
+palette = 10=#7ee787
+palette = 11=#ffa657
+palette = 12=#79c0ff
+palette = 13=#d2a8ff
+palette = 14=#a5d6ff
+palette = 15=#ffffff
+
+# Input feel
+mouse-scroll-multiplier = 0.4

@@ -13,11 +13,11 @@
     "   ╚═══════════╝  ╚═══════════╝  "
   ],
   "eyebrow": "",
-  "subtext": "",
-  "loadingText": "loading",
+  "subtext": "nebula cockpit",
+  "loadingText": "systems online",
   "showHairline": true,
-  "hairlineWidth": 44,
-  "animationMs": 0,
+  "hairlineWidth": 52,
+  "animationMs": 1500,
   "frameMs": 1000,
   "status": {
     "enabled": true,
@@ -25,16 +25,17 @@
     "showCwd": true,
     "showGit": true,
     "showModel": true,
+    "showThinking": true,
     "showContext": true,
     "showMessages": true
   },
   "colors": {
-    "ink": "#e8f7ff",
-    "muted": "#8fb2c7",
-    "dim": "#4e6b7a",
-    "accent": "#5ba4e6",
-    "accentHot": "#7ec8f0",
-    "accentCool": "#2d6db5",
-    "loading": "#76e3ea"
+    "ink": "#e6edf3",
+    "muted": "#8b949e",
+    "dim": "#566273",
+    "accent": "#58a6ff",
+    "accentHot": "#76e3ea",
+    "accentCool": "#8957e5",
+    "loading": "#7ee787"
   }
 }
