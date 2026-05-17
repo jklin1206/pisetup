@@ -148,6 +148,7 @@ export interface SegmentContext {
   
   // Computed
   usageStats: UsageStats;
+  contextTokens: number;
   contextPercent: number;
   contextWindow: number;
   autoCompactEnabled: boolean;
