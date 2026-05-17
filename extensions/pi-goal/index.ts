@@ -151,15 +151,35 @@ function suggestRoles(goalText: string): GoalRole[] {
 }
 
 function inferVerification(goal: string): string {
-  if (/test|pass|green|failing/i.test(goal)) return 'All tests pass with no regressions. Screenshots showing green test runs.'
-  if (/fix|bug|error|broken/i.test(goal)) return 'The reported issue is resolved. Screenshots showing the fix working correctly.'
-  if (/clean|organize|audit|conflict/i.test(goal)) return 'All identified conflicts are resolved. Before/after screenshots showing clean state.'
-  if (/catalog|populate|document/i.test(goal)) return 'All target items are cataloged and cross-linked. Screenshots of the cataloged content.'
-  if (/implement|build|create|add/i.test(goal)) return 'Implementation matches the spec. Screenshots and/or screen recording of the feature working end-to-end.'
-  if (/design|ui|ui|layout|page|site/i.test(goal)) return 'Visual matches the design intent. Screenshots of every key state and screen recording of the user flow.'
-  if (/deploy|launch|release/i.test(goal)) return 'Deployed and accessible. Screenshots of the live deployment working correctly.'
-  if (/research|investigate|find/i.test(goal)) return 'Research findings are documented with sources and gaps identified. Screenshots of key sources.'
-  return 'The objective is complete and verified. Screenshots and/or screen recording showing the working result.'
+  const evidence = evidenceRequirementText(goal)
+  if (/test|pass|green|failing/i.test(goal)) return `All tests pass with no regressions. ${evidence}`
+  if (/fix|bug|error|broken/i.test(goal)) return `The reported issue is resolved. ${evidence}`
+  if (/clean|organize|audit|conflict/i.test(goal)) return `All identified conflicts are resolved. ${evidence}`
+  if (/catalog|populate|document/i.test(goal)) return `All target items are cataloged and cross-linked. ${evidence}`
+  if (/implement|build|create|add/i.test(goal)) return `Implementation matches the spec. ${evidence}`
+  if (/design|ui|layout|page|site/i.test(goal)) return `Visual matches the design intent. ${evidence}`
+  if (/deploy|launch|release/i.test(goal)) return `Deployed and accessible. ${evidence}`
+  if (/research|investigate|find/i.test(goal)) return `Research findings are documented with sources and gaps identified. ${evidence}`
+  return `The objective is complete and verified. ${evidence}`
+}
+
+function requiresRecording(goalText: string): boolean {
+  return /\b(flow|interactive|interaction|click|form|submit|login|logout|sign[- ]?in|sign[- ]?up|onboard|checkout|purchase|payment|drag|drop|upload|download|modal|menu|dropdown|tab|wizard|multi[- ]?step|animation|transition|demo|walkthrough|video|recording|mobile app|web app|dashboard|ui|ux)\b/i.test(goalText)
+}
+
+function evidenceRequirementText(goalText: string): string {
+  return requiresRecording(goalText)
+    ? 'Completion requires at least one screenshot plus a screen recording of the interactive flow working end-to-end.'
+    : 'Completion requires at least one screenshot showing the final working result.'
+}
+
+function evidenceBlockers(goal: GoalRecord, evidence: EvidenceItem[]): string[] {
+  const screenshots = evidence.filter((e) => e.type === 'screenshot')
+  const recordings = evidence.filter((e) => e.type === 'recording' || e.type === 'screencast')
+  const blockers: string[] = []
+  if (screenshots.length === 0) blockers.push('at least one screenshot is required before the goal can be marked done')
+  if (requiresRecording(`${goal.goal} ${goal.verification}`) && recordings.length === 0) blockers.push('this appears to involve an interactive flow, so a screen recording is required before the goal can be marked done')
+  return blockers
 }
 
 function formatDuration(ms: number): string {
@@ -423,6 +443,8 @@ Look at the screenshots and/or video provided. Evaluate:
 1. **Completion**: Does the visual evidence show the goal is actually achieved?
    - Not "does the code exist" but "does it WORK as intended?"
    - Can you see the feature functioning correctly in the screenshots/recording?
+   - At least one screenshot is required for every completed goal.
+   - If the goal is interactive, a screen recording of the flow working end-to-end is required.
 
 2. **Visual Quality**: Note any visual issues:
    - Layout problems, broken styling, misalignment
@@ -564,6 +586,8 @@ Usage:
   goal list                             List all goals
 
 Evidence and verification:
+  Every completed goal requires at least one screenshot.
+  Interactive goals also require a screen recording of the flow working end-to-end.
   Capture screenshots/video of the final product or feature working.
   The current multimodal model, or configured vision model (${DEFAULT_VISION_MODEL}),
   reviews the visual evidence — not just text claims or worker handoffs.
@@ -611,6 +635,7 @@ Created: ${activeGoal.createdAt}
 Updated: ${activeGoal.updatedAt}
 
 Visual Evidence:
+  Required: ${evidenceRequirementText(`${activeGoal.goal} ${activeGoal.verification}`)}
   Screenshots: ${screenshots.length}
   Recordings: ${recordings.length}
   Total files: ${evidence.length}
@@ -838,7 +863,25 @@ Otherwise continue in the current session and use goal evaluate / evaluate-visua
     // Check if any iteration marked goal as met
     const metIteration = completedIterations.find((i) => i.goalMet === true)
 
-    if (metIteration && screenshots.length > 0) {
+    if (metIteration) {
+      const blockers = evidenceBlockers(active, allEvidence)
+      if (blockers.length > 0) {
+        active.status = 'evaluating'
+        await writeGoal(active)
+        return `Goal cannot be marked done yet — required visual evidence is missing.
+
+Goal: ${active.goal}
+Missing evidence:
+${blockers.map((b) => `- ${b}`).join('\n')}
+
+Capture evidence with:
+  goal screenshot
+  goal screenshot --window
+${requiresRecording(`${active.goal} ${active.verification}`) ? '  goal record-start\n  goal record-stop <pid>' : ''}
+
+Then run goal evaluate again.`
+      }
+
       active.status = 'done'
       await writeGoal(active)
       await execCmd('osascript', ['-e', `display notification "✅ Goal achieved: ${active.goal.slice(0, 80)}" with title "Goal"`], {}).catch(() => {})
@@ -972,20 +1015,20 @@ After evaluation, update the goal:
     await writeFile(notePath, existsSync(notePath) ? noteEntry : `# Goal Notes — ${active.id}\n${noteEntry}`, 'utf8')
 
     // Parse structured notes
-    if (/^COMPLETION:/i.test(noteContent)) {
-      const pct = noteContent.match(/COMPLETION:\s*(\d+)/)?.[1]
-      if (pct && parseInt(pct) >= 100) {
-        active.status = 'done'
+    const completeByPercent = /^COMPLETION:/i.test(noteContent) && parseInt(noteContent.match(/COMPLETION:\s*(\d+)/)?.[1] ?? '0') >= 100
+    const completeByGoalMet = /^GOAL_MET:\s*yes/i.test(noteContent)
+    if (completeByPercent || completeByGoalMet) {
+      const evidence = await collectEvidence(active.id)
+      const blockers = evidenceBlockers(active, evidence)
+      if (blockers.length > 0) {
+        active.status = 'evaluating'
         await writeGoal(active)
-        await execCmd('osascript', ['-e', `display notification "Goal achieved: ${active.goal.slice(0, 80)}" with title "Goal"`], {}).catch(() => {})
-        return `Note recorded. COMPLETION: ${pct}% → Goal marked as done! 🎉\n\n${noteContent}`
+        return `Note recorded, but goal cannot be marked done yet — required visual evidence is missing.\n\nMissing evidence:\n${blockers.map((b) => `- ${b}`).join('\n')}\n\nCapture evidence with:\n  goal screenshot\n  goal screenshot --window\n${requiresRecording(`${active.goal} ${active.verification}`) ? '  goal record-start\n  goal record-stop <pid>\n' : ''}\nThen add GOAL_MET: yes or COMPLETION: 100 again.\n\n${noteContent}`
       }
-    }
-    if (/^GOAL_MET:\s*yes/i.test(noteContent)) {
       active.status = 'done'
       await writeGoal(active)
       await execCmd('osascript', ['-e', `display notification "Goal achieved: ${active.goal.slice(0, 80)}" with title "Goal"`], {}).catch(() => {})
-      return `Note recorded. GOAL_MET: yes → Goal marked as done! 🎉\n\n${noteContent}`
+      return `Note recorded. Required visual evidence present → Goal marked as done! 🎉\n\n${noteContent}`
     }
     if (/^GOAL_MET:\s*blocked/i.test(noteContent)) {
       active.status = 'blocked'
@@ -1071,9 +1114,13 @@ ${constraints ? `## Constraints\n\n${constraints}` : ''}
 
 This goal requires **visual proof of completion**, not just text claims.
 
+Required evidence:
+
+${evidenceRequirementText(cleanGoal)}
+
 Capture:
 - **Screenshots** of the working result at every key state
-- **Screen recordings** of interactive flows (forms, transitions, multi-step processes)
+- **Screen recordings** of interactive flows when the goal is interactive (forms, transitions, multi-step processes)
 - **Evidence manifest** listing all captured files with labels
 
 The evaluation model (${visionModel}) will use multimodal vision to:
@@ -1153,7 +1200,8 @@ export default function (pi: ExtensionAPI) {
       'Use current-session tools first. Pull in scout/researcher/planner/reviewer workers only when they reduce context load or risk.',
       'Do not use implementation workers by default; only spawn worker role if the user explicitly requests delegated implementation.',
       'Keep goal creation responses concise; do not dump long next-step instructions unless asked.',
-      'Every goal requires VISUAL EVIDENCE — screenshots and/or screen recordings showing the working result.',
+      'Every completed goal requires at least one screenshot showing the working result.',
+      'Interactive goals require a screen recording of the flow working end-to-end before they can be marked done.',
       'The evaluation model uses multimodal vision to confirm: does it actually work, not just does the code exist.',
       'Use goal screenshot to manually capture evidence at any time.',
       'Use goal evaluate-visual to trigger a vision model review of captured evidence.',
