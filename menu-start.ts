@@ -282,7 +282,7 @@ function sectionLine(label: string, value: string, colors: { accent: Rgb; muted:
   return `${fg(colors.accent, label.padEnd(9, " "))}${fg(colors.muted, value)}`;
 }
 
-function renderHeader(width: number, _startedAt: number, config: MenuStartConfig, ctx: ExtensionContext) {
+function renderOverlay(width: number, _startedAt: number, config: MenuStartConfig, ctx: ExtensionContext) {
   const ink = hexToRgb(config.colors.ink, [232, 247, 255]);
   const muted = hexToRgb(config.colors.muted, [143, 178, 199]);
   const dimColor = hexToRgb(config.colors.dim, [78, 107, 122]);
@@ -297,7 +297,7 @@ function renderHeader(width: number, _startedAt: number, config: MenuStartConfig
     ? (elapsed / config.animationMs) * 1.4
     : 0;
 
-  const cardWidth = Math.min(Math.max(64, width - 28), 92);
+  const cardWidth = Math.max(58, Math.min(width, 92));
   const innerWidth = cardWidth - 4;
   const leftWidth = Math.min(34, Math.max(26, Math.floor(innerWidth * 0.4)));
   const rightWidth = innerWidth - leftWidth - 3;
@@ -350,7 +350,7 @@ function renderHeader(width: number, _startedAt: number, config: MenuStartConfig
     frameBottom("Press any key to continue", cardWidth, { border, muted }),
   ];
 
-  return ["", "", "", ...framed.map((line) => center(line, width)), ""];
+  return framed.map((line) => center(line, width));
 }
 
 export default function (pi: ExtensionAPI) {
@@ -371,25 +371,46 @@ export default function (pi: ExtensionAPI) {
     const startedAt = Date.now();
     stopAnimation();
     ctx.ui.setStatus("menu-start", dim("Π ready"));
-    ctx.ui.setHeader((tui) => {
-      let slowMode = false;
-      animationTimer = setInterval(() => {
-        tui.requestRender();
-        if (Date.now() - startedAt <= config.animationMs + 500) return;
 
+    void ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
         stopAnimation();
-        if (!config.status.enabled || slowMode) return;
-        slowMode = true;
-        animationTimer = setInterval(() => tui.requestRender(), Math.max(500, config.status.refreshMs));
-      }, Date.now() - startedAt <= config.animationMs ? 90 : Math.max(80, config.frameMs));
+        done();
+      };
+
+      const timeout = setTimeout(close, 4500);
+      animationTimer = setInterval(() => {
+        if (Date.now() - startedAt > config.animationMs + 500) {
+          stopAnimation();
+          return;
+        }
+        tui.requestRender();
+      }, 90);
 
       return {
         render(width: number) {
-          return renderHeader(width, startedAt, config, ctx);
+          return renderOverlay(width, startedAt, config, ctx);
+        },
+        handleInput() {
+          clearTimeout(timeout);
+          close();
         },
         invalidate() {},
       };
-    });
+    }, {
+      overlay: true,
+      overlayOptions: {
+        anchor: "center",
+        width: "58%",
+        minWidth: 64,
+        maxHeight: "80%",
+        margin: 2,
+        visible: (termWidth: number, termHeight: number) => termWidth >= 78 && termHeight >= 18,
+      },
+    }).catch(() => {});
   }
 
   pi.on("session_start", (_event, ctx) => {
@@ -405,7 +426,6 @@ export default function (pi: ExtensionAPI) {
     if (ctx.hasUI) {
       ctx.ui.setStatus("menu-start", undefined);
       ctx.ui.setWidget("menu-start", undefined);
-      ctx.ui.setHeader(undefined);
     }
   });
 
@@ -420,17 +440,16 @@ export default function (pi: ExtensionAPI) {
     stopAnimation();
     ctx.ui.setStatus("menu-start", undefined);
     ctx.ui.setWidget("menu-start", undefined);
-    ctx.ui.setHeader(undefined);
-    ctx.ui.notify("Default Pi header restored", "info");
+    ctx.ui.notify("Π Menu Start disabled for this session", "info");
   };
 
   pi.registerCommand("menu-start", {
-    description: "Enable or reload the polished Π Menu Start header",
+    description: "Show the polished Π Menu Start overlay",
     handler: enableMenuStart,
   });
 
   pi.registerCommand("menu-start-off", {
-    description: "Restore Pi's default header for this session",
+    description: "Disable the Π Menu Start overlay for this session",
     handler: disableMenuStart,
   });
 
