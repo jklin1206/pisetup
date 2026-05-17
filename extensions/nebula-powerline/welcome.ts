@@ -181,19 +181,19 @@ function renderWelcomeBox(
   termWidth: number, 
   bottomLine: string,
 ): string[] {
-  // Minimum width for two-column layout: leftCol(38) + separator(3) + minRightCol(48) = 89
-  const minLayoutWidth = 89;
+  // Minimum width for condensed two-column layout: leftCol(34) + separator(3) + minRightCol(41) = 78
+  const minLayoutWidth = 78;
   
   // If terminal is too narrow for the layout, return empty (skip welcome box)
   if (termWidth < minLayoutWidth) {
     return [];
   }
   
-  const minWidth = 96;
-  const maxWidth = 108;
+  const minWidth = 88;
+  const maxWidth = 96;
   // Clamp to termWidth to prevent crash on narrow terminals
   const boxWidth = Math.min(termWidth, Math.max(minWidth, Math.min(termWidth - 2, maxWidth)));
-  const leftCol = 38;
+  const leftCol = 34;
   const rightCol = Math.max(1, boxWidth - leftCol - 3); // Ensure rightCol is at least 1
   
   const hChar = "─";
@@ -260,13 +260,13 @@ export class WelcomeComponent implements Component {
 
   render(termWidth: number): string[] {
     // Minimum width for two-column layout (must match renderWelcomeBox)
-    const minLayoutWidth = 89;
+    const minLayoutWidth = 78;
     if (termWidth < minLayoutWidth) {
       return [];
     }
     
-    const minWidth = 96;
-    const maxWidth = 108;
+    const minWidth = 88;
+    const maxWidth = 96;
     // Clamp to termWidth to prevent crash on narrow terminals
     const boxWidth = Math.min(termWidth, Math.max(minWidth, Math.min(termWidth - 2, maxWidth)));
     
@@ -306,19 +306,19 @@ export class WelcomeHeader implements Component {
 
   render(termWidth: number): string[] {
     // Minimum width for two-column layout (must match renderWelcomeBox)
-    const minLayoutWidth = 89;
+    const minLayoutWidth = 78;
     if (termWidth < minLayoutWidth) {
       return [];
     }
     
-    const minWidth = 96;
-    const maxWidth = 108;
+    const minWidth = 88;
+    const maxWidth = 96;
     // Clamp to termWidth to prevent crash on narrow terminals
     const boxWidth = Math.min(termWidth, Math.max(minWidth, Math.min(termWidth - 2, maxWidth)));
     const hChar = "─";
     
-    // Bottom line with column separator (leftCol=38, rightCol=boxWidth-41)
-    const leftCol = 38;
+    // Bottom line with column separator (leftCol=34, rightCol=boxWidth-37)
+    const leftCol = 34;
     const rightCol = Math.max(1, boxWidth - leftCol - 3);
     const bottomLine = dim(hChar.repeat(leftCol)) + dim("┴") + dim(hChar.repeat(rightCol));
     

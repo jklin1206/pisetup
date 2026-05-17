@@ -38,10 +38,9 @@ const DEFAULT_COLORS: Required<ColorScheme> = {
   border: "#8957e5",
 };
 
-// Rainbow colors for high thinking levels
+// Hard thinking colors. No rainbow effects: high stays strict purple.
 const RAINBOW_COLORS = [
-  "#8957e5", "#bc8cff", "#58a6ff", "#79c0ff",
-  "#76e3ea", "#7ee787", "#d2a8ff", "#8957e5",
+  "#bc8cff",
 ];
 
 // Cache for user theme overrides
@@ -203,7 +202,7 @@ export function fg(
 }
 
 /**
- * Apply rainbow gradient to text (for high thinking levels)
+ * Apply high-thinking emphasis. Kept for API compatibility, but intentionally uses one strict purple color.
  */
 export function rainbow(text: string): string {
   let result = "";

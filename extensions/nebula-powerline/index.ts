@@ -2839,9 +2839,9 @@ export default function powerlineFooter(pi: ExtensionAPI) {
           overlay: true,
           overlayOptions: () => ({
             anchor: "center",
-            width: "92%",
-            minWidth: 112,
-            maxHeight: "90%",
+            width: "58%",
+            minWidth: 88,
+            maxHeight: "84%",
             margin: 2,
             visible: (termWidth: number, termHeight: number) => termWidth >= 100 && termHeight >= 24,
           }),

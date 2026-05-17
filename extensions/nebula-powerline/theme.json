@@ -19,7 +19,7 @@
     "border": "#8957e5"
   },
   "icons": {
-    "pi": "Π",
+    "pi": "\uE22C",
     "auto": "Π",
     "warning": "!"
   }
