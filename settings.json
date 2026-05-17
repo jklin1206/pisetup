@@ -1,10 +1,41 @@
 {
-  "lastChangelogVersion": "0.74.0",
-  "defaultProvider": "opencode-go",
-  "defaultModel": "deepseek-v4-flash",
-  "defaultThinkingLevel": "high",
+  "lastChangelogVersion": "0.74.1",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
+  "defaultThinkingLevel": "medium",
   "theme": "nebula-focus",
   "packages": [
     "npm:pi-mcp-adapter"
-  ]
+  ],
+  "enabledModels": [
+    "gpt-5.5*",
+    "glm-5.1*",
+    "kimi-k2.6",
+    "deepseek-v4-fast",
+    "deepseek-v4-pro",
+    "qwen-3.6*"
+  ],
+  "powerline": {
+    "preset": "full",
+    "fixedEditor": true,
+    "mouseScroll": true,
+    "customItems": [
+      {
+        "id": "goal",
+        "statusKey": "goal",
+        "position": "right",
+        "prefix": "goal",
+        "color": "accent",
+        "hideWhenMissing": false
+      },
+      {
+        "id": "workers",
+        "statusKey": "workers",
+        "position": "right",
+        "prefix": "workers",
+        "color": "success",
+        "hideWhenMissing": false
+      }
+    ]
+  }
 }

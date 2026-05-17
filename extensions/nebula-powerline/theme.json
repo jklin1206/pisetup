@@ -1,0 +1,25 @@
+{
+  "colors": {
+    "pi": "#76e3ea",
+    "model": "#76e3ea",
+    "shellMode": "#7ee787",
+    "path": "#58a6ff",
+    "gitClean": "#7ee787",
+    "gitDirty": "#d29922",
+    "thinking": "thinkingOff",
+    "thinkingMinimal": "thinkingMinimal",
+    "thinkingLow": "thinkingLow",
+    "thinkingMedium": "thinkingMedium",
+    "context": "dim",
+    "contextWarn": "warning",
+    "contextError": "error",
+    "cost": "text",
+    "tokens": "muted",
+    "separator": "#566273",
+    "border": "#8957e5"
+  },
+  "icons": {
+    "auto": "Π",
+    "warning": "!"
+  }
+}
